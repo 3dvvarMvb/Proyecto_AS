@@ -1,0 +1,2 @@
+# Dependencias para el Bus de Mensajes
+# No requiere dependencias externas, solo bibliotecas estándar de Python

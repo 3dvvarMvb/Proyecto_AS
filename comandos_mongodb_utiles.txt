@@ -1,0 +1,532 @@
+================================================================================
+COMANDOS MONGODB ÚTILES - PROYECTO ARQUITECTURA DE SOFTWARE
+================================================================================
+
+================================================================================
+1. CONEXIÓN A MONGODB
+================================================================================
+
+# Conectar vía Docker
+docker exec -it arquitectura_mongodb mongosh
+
+# Conectar desde el host (si tienes mongosh instalado)
+mongosh "mongodb://admin:admin123@localhost:27017/arquitectura_software?authSource=admin"
+
+# Conectar vía Mongo Express (interfaz web)
+# Abrir en navegador: http://localhost:8081
+# Usuario: admin
+# Contraseña: admin123
+
+================================================================================
+2. COMANDOS BÁSICOS DE NAVEGACIÓN
+================================================================================
+
+# Autenticarse
+use admin
+db.auth('admin', 'admin123')
+
+# Cambiar a la base de datos del proyecto
+use arquitectura_software
+
+# Ver bases de datos disponibles
+show dbs
+
+# Ver base de datos actual
+db
+
+# Ver colecciones disponibles
+show collections
+
+# Ver usuarios de la base de datos
+show users
+
+# Ayuda general
+help
+
+# Ayuda de métodos de db
+db.help()
+
+# Ayuda de métodos de colección
+db.usuarios.help()
+
+================================================================================
+3. CONSULTAS EN COLECCIÓN: usuarios
+================================================================================
+
+# Ver todos los usuarios
+db.usuarios.find()
+
+# Ver usuarios con formato legible
+db.usuarios.find().pretty()
+
+# Contar usuarios
+db.usuarios.countDocuments()
+
+# Buscar por tipo de usuario
+db.usuarios.find({ tipo_usuario: "administrador" })
+db.usuarios.find({ tipo_usuario: "conserje" })
+db.usuarios.find({ tipo_usuario: "personal" })
+
+# Buscar por RUT
+db.usuarios.find({ rut: "12345678-9" })
+
+# Buscar por correo
+db.usuarios.find({ correo: "admin@condominio.cl" })
+
+# Buscar con expresión regular (case insensitive)
+db.usuarios.find({ correo: /admin/i })
+
+# Proyección (mostrar solo ciertos campos)
+db.usuarios.find({}, { correo: 1, tipo_usuario: 1, _id: 0 })
+
+# Ordenar por correo
+db.usuarios.find().sort({ correo: 1 })
+
+# Limitar resultados
+db.usuarios.find().limit(5)
+
+# Saltar y limitar (paginación)
+db.usuarios.find().skip(0).limit(10)
+
+# Contar por tipo de usuario
+db.usuarios.countDocuments({ tipo_usuario: "administrador" })
+
+# Obtener un solo documento
+db.usuarios.findOne({ rut: "12345678-9" })
+
+================================================================================
+4. CONSULTAS EN COLECCIÓN: llamadas
+================================================================================
+
+# Ver todas las llamadas
+db.llamadas.find()
+
+# Ver llamadas con formato legible
+db.llamadas.find().pretty()
+
+# Contar llamadas
+db.llamadas.countDocuments()
+
+# Buscar por departamento
+db.llamadas.find({ depto: "101" })
+
+# Buscar por status
+db.llamadas.find({ status: "recibida" })
+db.llamadas.find({ status: "rechazada" })
+db.llamadas.find({ status: "sin respuesta" })
+
+# Buscar por caller
+db.llamadas.find({ caller: "Juan Pérez" })
+
+# Buscar llamadas de hoy
+db.llamadas.find({ 
+  fecha: { 
+    $gte: new Date(new Date().setHours(0,0,0,0)) 
+  } 
+})
+
+# Buscar llamadas por rango de fechas
+db.llamadas.find({ 
+  fecha: { 
+    $gte: ISODate("2025-01-01"), 
+    $lte: ISODate("2025-12-31") 
+  } 
+})
+
+# Buscar llamadas recibidas de un departamento específico
+db.llamadas.find({ 
+  depto: "101", 
+  status: "recibida" 
+})
+
+# Ordenar por fecha descendente (más recientes primero)
+db.llamadas.find().sort({ fecha: -1 })
+
+# Agrupar y contar por status
+db.llamadas.aggregate([
+  { $group: { _id: "$status", total: { $sum: 1 } } }
+])
+
+# Llamadas por departamento (top 5)
+db.llamadas.aggregate([
+  { $group: { _id: "$depto", total: { $sum: 1 } } },
+  { $sort: { total: -1 } },
+  { $limit: 5 }
+])
+
+================================================================================
+5. CONSULTAS EN COLECCIÓN: mensajes
+================================================================================
+
+# Ver todos los mensajes
+db.mensajes.find()
+
+# Ver mensajes con formato legible
+db.mensajes.find().pretty()
+
+# Contar mensajes
+db.mensajes.countDocuments()
+
+# Buscar mensajes de un sender específico (usar ObjectId real)
+db.mensajes.find({ sender: ObjectId("670868b75dd12e6a04b89cbb") })
+
+# Buscar mensajes para un receiver específico
+db.mensajes.find({ receiver: ObjectId("670868b75dd12e6a04b89cbc") })
+
+# Buscar mensajes entre dos usuarios
+db.mensajes.find({ 
+  $or: [
+    { sender: ObjectId("ID1"), receiver: ObjectId("ID2") },
+    { sender: ObjectId("ID2"), receiver: ObjectId("ID1") }
+  ]
+}).sort({ fecha: 1, hora: 1 })
+
+# Buscar mensajes que contengan texto específico
+db.mensajes.find({ mensaje: /mantenimiento/i })
+
+# Mensajes de hoy
+db.mensajes.find({ 
+  fecha: { 
+    $gte: new Date(new Date().setHours(0,0,0,0)) 
+  } 
+})
+
+# Ordenar por fecha y hora
+db.mensajes.find().sort({ fecha: -1, hora: -1 })
+
+# Mensajes con lookup a usuarios (JOIN)
+db.mensajes.aggregate([
+  {
+    $lookup: {
+      from: "usuarios",
+      localField: "sender",
+      foreignField: "_id",
+      as: "sender_info"
+    }
+  },
+  {
+    $lookup: {
+      from: "usuarios",
+      localField: "receiver",
+      foreignField: "_id",
+      as: "receiver_info"
+    }
+  },
+  { $limit: 5 }
+])
+
+================================================================================
+6. OPERACIONES DE INSERCIÓN
+================================================================================
+
+# Insertar un usuario
+db.usuarios.insertOne({
+  tipo_usuario: "personal",
+  correo: "nuevo@condominio.cl",
+  rut: "99887766-5"
+})
+
+# Insertar múltiples usuarios
+db.usuarios.insertMany([
+  {
+    tipo_usuario: "conserje",
+    correo: "conserje2@condominio.cl",
+    rut: "11111111-1"
+  },
+  {
+    tipo_usuario: "personal",
+    correo: "personal2@condominio.cl",
+    rut: "22222222-2"
+  }
+])
+
+# Insertar una llamada
+db.llamadas.insertOne({
+  fecha: new Date(),
+  hora: "14:30",
+  caller: "Pedro Martínez",
+  depto: "303",
+  status: "recibida"
+})
+
+# Insertar un mensaje (necesitas ObjectIds reales)
+var sender = db.usuarios.findOne({ rut: "12345678-9" });
+var receiver = db.usuarios.findOne({ rut: "98765432-1" });
+
+db.mensajes.insertOne({
+  fecha: new Date(),
+  hora: "15:45",
+  sender: sender._id,
+  receiver: receiver._id,
+  mensaje: "Mensaje de prueba desde mongosh"
+})
+
+================================================================================
+7. OPERACIONES DE ACTUALIZACIÓN
+================================================================================
+
+# Actualizar un usuario por RUT
+db.usuarios.updateOne(
+  { rut: "12345678-9" },
+  { $set: { correo: "admin_nuevo@condominio.cl" } }
+)
+
+# Actualizar múltiples documentos
+db.llamadas.updateMany(
+  { status: "sin respuesta" },
+  { $set: { status: "sin_respuesta" } }
+)
+
+# Actualizar o insertar (upsert)
+db.usuarios.updateOne(
+  { rut: "33333333-3" },
+  { 
+    $set: { 
+      tipo_usuario: "personal",
+      correo: "upsert@condominio.cl"
+    } 
+  },
+  { upsert: true }
+)
+
+# Incrementar un campo numérico
+db.usuarios.updateOne(
+  { rut: "12345678-9" },
+  { $inc: { login_count: 1 } }
+)
+
+# Agregar campo si no existe
+db.usuarios.updateMany(
+  {},
+  { $set: { activo: true } }
+)
+
+================================================================================
+8. OPERACIONES DE ELIMINACIÓN
+================================================================================
+
+# Eliminar un usuario por RUT
+db.usuarios.deleteOne({ rut: "99887766-5" })
+
+# Eliminar múltiples documentos
+db.llamadas.deleteMany({ status: "rechazada" })
+
+# Eliminar todos los documentos de una colección (⚠️ CUIDADO)
+db.mensajes.deleteMany({})
+
+# Eliminar colección completa (⚠️ CUIDADO)
+db.usuarios.drop()
+
+================================================================================
+9. ÍNDICES
+================================================================================
+
+# Ver índices de una colección
+db.usuarios.getIndexes()
+db.llamadas.getIndexes()
+db.mensajes.getIndexes()
+
+# Crear índice
+db.usuarios.createIndex({ correo: 1 })
+
+# Crear índice único
+db.usuarios.createIndex({ rut: 1 }, { unique: true })
+
+# Crear índice compuesto
+db.llamadas.createIndex({ depto: 1, fecha: -1 })
+
+# Crear índice de texto para búsqueda
+db.mensajes.createIndex({ mensaje: "text" })
+
+# Buscar usando índice de texto
+db.mensajes.find({ $text: { $search: "mantenimiento" } })
+
+# Eliminar índice
+db.usuarios.dropIndex("correo_1")
+
+# Ver estadísticas de uso de índices
+db.usuarios.aggregate([{ $indexStats: {} }])
+
+================================================================================
+10. AGREGACIONES AVANZADAS
+================================================================================
+
+# Contar usuarios por tipo
+db.usuarios.aggregate([
+  { $group: { _id: "$tipo_usuario", count: { $sum: 1 } } }
+])
+
+# Estadísticas de llamadas por departamento
+db.llamadas.aggregate([
+  { 
+    $group: { 
+      _id: "$depto", 
+      total: { $sum: 1 },
+      recibidas: { 
+        $sum: { $cond: [{ $eq: ["$status", "recibida"] }, 1, 0] } 
+      }
+    } 
+  },
+  { $sort: { total: -1 } }
+])
+
+# Promedio de mensajes por usuario
+db.mensajes.aggregate([
+  { $group: { _id: "$sender", total: { $sum: 1 } } },
+  { $group: { _id: null, promedio: { $avg: "$total" } } }
+])
+
+# Llamadas por día
+db.llamadas.aggregate([
+  {
+    $group: {
+      _id: { 
+        $dateToString: { format: "%Y-%m-%d", date: "$fecha" } 
+      },
+      total: { $sum: 1 }
+    }
+  },
+  { $sort: { _id: -1 } }
+])
+
+================================================================================
+11. BACKUP Y RESTORE
+================================================================================
+
+# Crear backup (desde terminal del host, no mongosh)
+docker exec arquitectura_mongodb mongodump \
+  --username=admin \
+  --password=admin123 \
+  --authenticationDatabase=admin \
+  --db=arquitectura_software \
+  --out=/backup
+
+# Copiar backup del contenedor al host
+docker cp arquitectura_mongodb:/backup ./mongodb_backup
+
+# Restaurar backup (desde terminal del host)
+docker exec arquitectura_mongodb mongorestore \
+  --username=admin \
+  --password=admin123 \
+  --authenticationDatabase=admin \
+  --db=arquitectura_software \
+  /backup/arquitectura_software
+
+# Exportar colección a JSON
+docker exec arquitectura_mongodb mongoexport \
+  --username=admin \
+  --password=admin123 \
+  --authenticationDatabase=admin \
+  --db=arquitectura_software \
+  --collection=usuarios \
+  --out=/backup/usuarios.json
+
+# Importar colección desde JSON
+docker exec arquitectura_mongodb mongoimport \
+  --username=admin \
+  --password=admin123 \
+  --authenticationDatabase=admin \
+  --db=arquitectura_software \
+  --collection=usuarios \
+  --file=/backup/usuarios.json
+
+================================================================================
+12. ADMINISTRACIÓN Y MONITOREO
+================================================================================
+
+# Ver estadísticas de la base de datos
+db.stats()
+
+# Ver estadísticas de una colección
+db.usuarios.stats()
+
+# Ver tamaño de las colecciones
+db.usuarios.storageSize()
+db.llamadas.storageSize()
+db.mensajes.storageSize()
+
+# Ver operaciones en curso
+db.currentOp()
+
+# Ver logs del servidor
+db.adminCommand({ getLog: "global" })
+
+# Ver configuración del servidor
+db.serverStatus()
+
+# Ver información de replicación
+db.getReplicationInfo()
+
+# Validar colección
+db.usuarios.validate()
+
+# Reparar base de datos
+db.repairDatabase()
+
+# Ver conexiones activas
+db.serverStatus().connections
+
+================================================================================
+13. SEGURIDAD
+================================================================================
+
+# Crear nuevo usuario
+use admin
+db.createUser({
+  user: "nuevo_usuario",
+  pwd: "password_seguro",
+  roles: [
+    { role: "readWrite", db: "arquitectura_software" }
+  ]
+})
+
+# Ver usuarios
+db.getUsers()
+
+# Cambiar contraseña
+db.changeUserPassword("nuevo_usuario", "nueva_password")
+
+# Eliminar usuario
+db.dropUser("nuevo_usuario")
+
+# Otorgar rol a usuario
+db.grantRolesToUser("app_user", [
+  { role: "dbAdmin", db: "arquitectura_software" }
+])
+
+# Revocar rol de usuario
+db.revokeRolesFromUser("app_user", [
+  { role: "dbAdmin", db: "arquitectura_software" }
+])
+
+================================================================================
+14. UTILIDADES
+================================================================================
+
+# Salir de mongosh
+exit
+
+# Limpiar pantalla
+cls
+
+# Ver versión de MongoDB
+db.version()
+
+# Ver hostname
+db.hostInfo()
+
+# Ejecutar JavaScript
+var count = db.usuarios.countDocuments();
+print("Total usuarios: " + count);
+
+# Iterar sobre resultados
+db.usuarios.find().forEach(function(doc) {
+  print(doc.correo);
+});
+
+# Pretty print de un documento
+printjson(db.usuarios.findOne())
+
+================================================================================
+FIN DE COMANDOS MONGODB ÚTILES
+================================================================================

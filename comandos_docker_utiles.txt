@@ -1,0 +1,293 @@
+================================================================================
+COMANDOS DOCKER ÚTILES - PROYECTO ARQUITECTURA DE SOFTWARE
+================================================================================
+
+================================================================================
+1. COMANDOS BÁSICOS DE DOCKER COMPOSE
+================================================================================
+
+# Iniciar todos los servicios
+docker-compose up -d
+
+# Iniciar con reconstrucción de imágenes
+docker-compose up -d --build
+
+# Ver logs de todos los servicios
+docker-compose logs -f
+
+# Ver logs de un servicio específico
+docker-compose logs -f bus
+docker-compose logs -f servicio-llamadas
+docker-compose logs -f servicio-autenticacion
+docker-compose logs -f servicio-mensajeria
+docker-compose logs -f servicio-administracion
+docker-compose logs -f servicio-registro-llamadas
+docker-compose logs -f mongodb
+
+# Ver últimas 100 líneas de logs
+docker-compose logs --tail=100 -f
+
+# Detener todos los servicios
+docker-compose stop
+
+# Detener un servicio específico
+docker-compose stop bus
+docker-compose stop servicio-llamadas
+
+# Reiniciar todos los servicios
+docker-compose restart
+
+# Reiniciar un servicio específico
+docker-compose restart bus
+docker-compose restart servicio-llamadas
+
+# Bajar todos los servicios (elimina contenedores pero no volúmenes)
+docker-compose down
+
+# Bajar servicios y eliminar volúmenes (⚠️ ELIMINA DATOS DE MONGODB)
+docker-compose down -v
+
+# Bajar servicios, eliminar volúmenes e imágenes
+docker-compose down -v --rmi all
+
+================================================================================
+2. ACCEDER A LAS CONSOLAS DE LOS CONTENEDORES
+================================================================================
+
+# Acceder al BUS (bash)
+docker exec -it arquitectura_bus /bin/bash
+
+# Acceder al BUS (shell de Python)
+docker exec -it arquitectura_bus python
+
+# Acceder a servicio de llamadas
+docker exec -it servicio_llamadas /bin/bash
+
+# Acceder a servicio de autenticación
+docker exec -it servicio_autenticacion /bin/bash
+
+# Acceder a servicio de mensajería
+docker exec -it servicio_mensajeria /bin/bash
+
+# Acceder a servicio de administración
+docker exec -it servicio_administracion /bin/bash
+
+# Acceder a servicio de registro de llamadas
+docker exec -it servicio_registro_llamadas /bin/bash
+
+# Acceder a MongoDB (mongosh)
+docker exec -it arquitectura_mongodb mongosh
+
+# Acceder a MongoDB (bash)
+docker exec -it arquitectura_mongodb /bin/bash
+
+================================================================================
+3. VERIFICACIÓN DE ESTADO
+================================================================================
+
+# Ver estado de todos los contenedores
+docker-compose ps
+
+# Ver estado detallado
+docker-compose ps -a
+
+# Ver uso de recursos (CPU, memoria)
+docker stats
+
+# Ver uso de recursos de un contenedor específico
+docker stats arquitectura_bus
+
+# Inspeccionar un contenedor
+docker inspect arquitectura_bus
+docker inspect servicio_llamadas
+
+# Ver redes creadas
+docker network ls
+
+# Inspeccionar red del proyecto
+docker network inspect arquitectura_network
+
+# Ver volúmenes
+docker volume ls
+
+# Inspeccionar volumen de MongoDB
+docker volume inspect mongodb_data
+
+================================================================================
+4. CONSTRUCCIÓN Y RECONSTRUCCIÓN DE IMÁGENES
+================================================================================
+
+# Construir todas las imágenes
+docker-compose build
+
+# Construir sin usar caché
+docker-compose build --no-cache
+
+# Construir solo el BUS
+docker-compose build bus
+
+# Construir solo los servicios
+docker-compose build servicio-llamadas
+
+# Forzar reconstrucción al iniciar
+docker-compose up -d --build --force-recreate
+
+================================================================================
+5. LIMPIEZA Y MANTENIMIENTO
+================================================================================
+
+# Eliminar contenedores detenidos
+docker container prune
+
+# Eliminar imágenes no utilizadas
+docker image prune
+
+# Eliminar todo lo no utilizado (contenedores, redes, imágenes, caché)
+docker system prune
+
+# Limpieza agresiva (⚠️ ELIMINA TODO LO NO USADO)
+docker system prune -a --volumes
+
+# Ver espacio usado por Docker
+docker system df
+
+# Eliminar imagen específica
+docker rmi <image_id>
+
+# Eliminar todas las imágenes del proyecto
+docker-compose down --rmi all
+
+# Eliminar contenedor específico
+docker rm arquitectura_bus
+docker rm servicio_llamadas
+
+# Forzar eliminación de contenedor en ejecución
+docker rm -f arquitectura_bus
+
+================================================================================
+6. DEBUGGING Y TROUBLESHOOTING
+================================================================================
+
+# Ver logs desde un momento específico
+docker-compose logs --since 30m
+
+# Ver logs hasta un momento específico
+docker-compose logs --until 2025-10-10T12:00:00
+
+# Seguir logs de múltiples servicios
+docker-compose logs -f bus servicio-llamadas servicio-autenticacion
+
+# Ejecutar comando en contenedor en ejecución
+docker exec arquitectura_bus ls -la
+docker exec servicio_llamadas ps aux
+
+# Ver procesos dentro de un contenedor
+docker top arquitectura_bus
+
+# Ver cambios en el filesystem del contenedor
+docker diff arquitectura_bus
+
+# Copiar archivos desde el contenedor al host
+docker cp arquitectura_bus:/app/BUS.py ./BUS_backup.py
+
+# Copiar archivos desde el host al contenedor
+docker cp ./nuevo_archivo.py servicio_llamadas:/app/
+
+# Ver historial de una imagen
+docker history bus:latest
+
+# Pausar un contenedor
+docker pause arquitectura_bus
+
+# Despausar un contenedor
+docker unpause arquitectura_bus
+
+================================================================================
+7. ESCALAMIENTO Y RÉPLICAS
+================================================================================
+
+# Escalar un servicio (crear múltiples instancias)
+docker-compose up -d --scale servicio-llamadas=3
+
+# Ver número de réplicas
+docker-compose ps servicio-llamadas
+
+================================================================================
+8. EXPORTAR E IMPORTAR
+================================================================================
+
+# Exportar contenedor como imagen tar
+docker save -o bus_image.tar bus:latest
+
+# Importar imagen desde tar
+docker load -i bus_image.tar
+
+# Exportar contenedor en ejecución
+docker export arquitectura_bus > bus_container.tar
+
+# Importar contenedor
+docker import bus_container.tar bus:imported
+
+================================================================================
+9. HEALTHCHECKS Y MONITOREO
+================================================================================
+
+# Ver salud de los contenedores
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+# Verificar healthcheck de un contenedor
+docker inspect --format='{{json .State.Health}}' arquitectura_bus | python -m json.tool
+
+# Ejecutar healthcheck manualmente
+docker exec arquitectura_bus python -c "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()"
+
+================================================================================
+10. COMANDOS AVANZADOS
+================================================================================
+
+# Actualizar recursos de un contenedor (sin reiniciar)
+docker update --memory="512m" --cpus="1.0" arquitectura_bus
+
+# Ver eventos de Docker en tiempo real
+docker events
+
+# Ver eventos filtrados por contenedor
+docker events --filter container=arquitectura_bus
+
+# Crear backup de volumen de MongoDB
+docker run --rm -v mongodb_data:/data -v $(pwd):/backup alpine tar czf /backup/mongodb_backup.tar.gz -C /data .
+
+# Restaurar backup de volumen de MongoDB
+docker run --rm -v mongodb_data:/data -v $(pwd):/backup alpine tar xzf /backup/mongodb_backup.tar.gz -C /data
+
+# Modo interactivo: ejecutar bash en nuevo contenedor
+docker run -it --rm python:3.11-slim /bin/bash
+
+================================================================================
+11. ATAJOS ÚTILES
+================================================================================
+
+# Reinicio rápido de todo el sistema
+docker-compose down && docker-compose up -d --build
+
+# Ver logs de errores solamente
+docker-compose logs | grep -i error
+
+# Limpiar y reiniciar desde cero
+docker-compose down -v && docker system prune -f && docker-compose up -d --build
+
+# Ver IPs de los contenedores
+docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(docker ps -aq)
+
+# Detener todos los contenedores
+docker stop $(docker ps -aq)
+
+# Eliminar todos los contenedores
+docker rm $(docker ps -aq)
+
+# Eliminar todas las imágenes
+docker rmi $(docker images -q)
+
+================================================================================
+FIN DE COMANDOS DOCKER ÚTILES
+================================================================================
