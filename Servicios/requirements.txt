@@ -1,2 +1,4 @@
 # Dependencias para los Servicios
 pymongo==4.6.1
+bcrypt
+dnspython==2.6.1
