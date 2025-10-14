@@ -12,11 +12,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar todos los servicios
-COPY llamadas.py .
-COPY autenticacion.py .
-COPY mensajeria.py .
-COPY administracion.py .
-COPY registro_llamadas.py .
+COPY Llamadas.py .
+COPY Autenticacion.py .
+COPY Mensajeria.py .
+COPY Administrador.py .
+COPY Registro_llamadas.py .
 
 # Variables de entorno
 ENV PYTHONUNBUFFERED=1
