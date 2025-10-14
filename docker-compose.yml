@@ -1,53 +1,46 @@
-version: '3.8'
-
 networks:
   arquitectura_network:
     driver: bridge
 
 volumes:
   mongodb_data:
-    driver: local
   mongodb_config:
-    driver: local
 
 services:
-  # ==========================================
-  # BASE DE DATOS MONGODB
-  # ==========================================
   mongodb:
-    build:
-      context: ./MongoDB
-      dockerfile: Dockerfile
+    image: mongo:7
     container_name: arquitectura_mongodb
     restart: unless-stopped
-    ports:
-      - "27017:27017"
+    ports: ["27017:27017"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
       MONGO_INITDB_ROOT_PASSWORD: admin123
-      MONGO_INITDB_DATABASE: arquitectura_software
+      MONGO_INITDB_DATABASE: admin
     volumes:
       - mongodb_data:/data/db
       - mongodb_config:/data/configdb
-      - ./mongodb-setup/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
-    networks:
-      - arquitectura_network
+      - ./MongoDB/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks: [arquitectura_network]
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--username", "admin",
+          "--password", "admin123",
+          "--authenticationDatabase", "admin",
+          "--eval", "db.adminCommand('ping')"
+        ]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 40s
+      retries: 10
+      start_period: 50s
 
-  # ==========================================
-  # INTERFAZ WEB MONGO EXPRESS
-  # ==========================================
   mongo-express:
-    image: mongo-express:latest
+    image: mongo-express:1.0.2-20
     container_name: mongo_express_ui
     restart: unless-stopped
-    ports:
-      - "8081:8081"
+    ports: ["8081:8081"]
     environment:
       ME_CONFIG_MONGODB_ADMINUSERNAME: admin
       ME_CONFIG_MONGODB_ADMINPASSWORD: admin123
@@ -57,174 +50,120 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-    networks:
-      - arquitectura_network
+    networks: [arquitectura_network]
 
-  # ==========================================
-  # BUS DE MENSAJES
-  # ==========================================
   bus:
     build:
       context: ./BUS
       dockerfile: Dockerfile
     container_name: arquitectura_bus
     restart: unless-stopped
-    ports:
-      - "5000:5000"
+    ports: ["5000:5000"]
     environment:
       BUS_HOST: 0.0.0.0
       BUS_PORT: 5000
       PYTHONUNBUFFERED: 1
-    networks:
-      - arquitectura_network
+    networks: [arquitectura_network]
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost', 5000)); s.close()"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',5000)); s.close()"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 5s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
 
-  # ==========================================
-  # SERVICIO: LLAMADAS
-  # ==========================================
-  servicio-llamadas:
-    build:
-      context: ./Servicios
-      dockerfile: Dockerfile
-    container_name: servicio_llamadas
-    restart: unless-stopped
-    environment:
-      BUS_HOST: bus
-      BUS_PORT: 5000
-      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin
-      PYTHONUNBUFFERED: 1
-    command: python -u llamadas.py
-    depends_on:
-      bus:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    networks:
-      - arquitectura_network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  # ==========================================
-  # SERVICIO: AUTENTICACIÓN
-  # ==========================================
   servicio-autenticacion:
-    build:
-      context: ./Servicios
-      dockerfile: Dockerfile
+    build: { context: ./Servicios, dockerfile: Dockerfile }
     container_name: servicio_autenticacion
     restart: unless-stopped
     environment:
       BUS_HOST: bus
       BUS_PORT: 5000
-      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin
+      # URI sin DB, con authSource=admin. La DB real va por MONGO_DB:
+      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin
+      MONGO_DB: usuarios_db
       PYTHONUNBUFFERED: 1
-    command: python -u autenticacion.py
+    command: python -u auth/Autenticacion.py
     depends_on:
-      bus:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    networks:
-      - arquitectura_network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      mongodb: { condition: service_healthy }
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
 
-  # ==========================================
-  # SERVICIO: MENSAJERÍA
-  # ==========================================
   servicio-mensajeria:
-    build:
-      context: ./Servicios
-      dockerfile: Dockerfile
+    build: { context: ./Servicios, dockerfile: Dockerfile }
     container_name: servicio_mensajeria
     restart: unless-stopped
     environment:
       BUS_HOST: bus
       BUS_PORT: 5000
-      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin
+      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin
+      MONGO_DB: mensajes_db
       PYTHONUNBUFFERED: 1
-    command: python -u mensajeria.py
+    command: python -u messages/Mensajeria.py
     depends_on:
-      bus:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    networks:
-      - arquitectura_network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      mongodb: { condition: service_healthy }
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
 
-  # ==========================================
-  # SERVICIO: ADMINISTRACIÓN
-  # ==========================================
-  servicio-administracion:
-    build:
-      context: ./Servicios
-      dockerfile: Dockerfile
-    container_name: servicio_administracion
+  servicio-llamadas:
+    build: { context: ./Servicios, dockerfile: Dockerfile }
+    container_name: servicio_llamadas
     restart: unless-stopped
     environment:
       BUS_HOST: bus
       BUS_PORT: 5000
-      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin
       PYTHONUNBUFFERED: 1
-    command: python -u administracion.py
+    command: python -u calls/Llamadas.py
     depends_on:
-      bus:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    networks:
-      - arquitectura_network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
 
-  # ==========================================
-  # SERVICIO: REGISTRO DE LLAMADAS
-  # ==========================================
   servicio-registro-llamadas:
-    build:
-      context: ./Servicios
-      dockerfile: Dockerfile
+    build: { context: ./Servicios, dockerfile: Dockerfile }
     container_name: servicio_registro_llamadas
     restart: unless-stopped
     environment:
       BUS_HOST: bus
       BUS_PORT: 5000
-      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin
+      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin
+      MONGO_DB: llamadas_db
       PYTHONUNBUFFERED: 1
-    command: python -u registro_llamadas.py
+    command: python -u calls/Registro_llamadas.py
     depends_on:
-      bus:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
-    networks:
-      - arquitectura_network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      mongodb: { condition: service_healthy }
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
+
+  servicio-administracion:
+    build: { context: ./Servicios, dockerfile: Dockerfile }
+    container_name: servicio_administracion
+    restart: unless-stopped
+    environment:
+      BUS_HOST: bus
+      BUS_PORT: 5000
+      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin
+      MONGO_DB: usuarios_db
+      PYTHONUNBUFFERED: 1
+    command: python -u admin/Administrador.py
+    depends_on:
+      mongodb: { condition: service_healthy }
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
+
+  servicio-contactos:
+    build: { context: ./Servicios, dockerfile: Dockerfile }
+    container_name: servicio_contactos
+    restart: unless-stopped
+    environment:
+      BUS_HOST: bus
+      BUS_PORT: 5000
+      # Contactos usará la colección 'contactos' dentro de usuarios_db
+      MONGO_URI: mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin
+      MONGO_DB: usuarios_db
+      MONGO_COLL: contactos
+      RUN_TESTS: "0"
+      PYTHONUNBUFFERED: 1
+    command: python -u contacts/Contactos.py
+    depends_on:
+      mongodb: { condition: service_healthy }
+      bus: { condition: service_healthy }
+    networks: [arquitectura_network]
