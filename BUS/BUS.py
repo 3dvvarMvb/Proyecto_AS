@@ -132,6 +132,10 @@ class MessageBus:
             send_jsonline(client_socket, ack)
             logging.info(f"✅ Registrado: id={client_id} kind={kind} service={service_name} desde {address}")
 
+            # ✅ Broadcast a todos los clientes que alguien se conectó
+            if kind == "client":
+                self._broadcast_user_joined(client_id, sender_id=client_id)
+
             # Loop de mensajes NDJSON
             while self.running:
                 data = client_socket.recv(65536)
@@ -165,6 +169,11 @@ class MessageBus:
                 self.topic_subs[topic].discard(client_id)
             self.clients.pop(client_id, None)
             self.client_meta.pop(client_id, None)
+        
+        # ✅ Broadcast a todos que alguien se desconectó
+        if kind == "client":
+            self._broadcast_user_left(client_id)
+        
         logging.info(f"🔌 Desconectado: {client_id}")
 
     # ------------------------- enrutamiento -------------------------
@@ -319,6 +328,41 @@ class MessageBus:
             send_jsonline(sock, obj)
         except Exception as e:
             logging.error(f"Error enviando a {client_id}: {e}")
+
+    # ✅ Broadcast de usuarios conectados/desconectados
+    def _broadcast_user_joined(self, client_id: str, sender_id: str):
+        """Notifica a todos los clientes que alguien se conectó"""
+        msg = {
+            "type": "BROADCAST",
+            "event": "user_joined",
+            "client_id": client_id,
+            "timestamp": utcnow_iso()
+        }
+        with self.clients_lock:
+            for cid, sock in self.clients.items():
+                if cid != sender_id and self.client_meta.get(cid, {}).get("kind") == "client":
+                    try:
+                        send_jsonline(sock, msg)
+                    except Exception as e:
+                        logging.error(f"Error broadcasting user_joined a {cid}: {e}")
+        logging.info(f"📢 Broadcast: {client_id} se unió")
+
+    def _broadcast_user_left(self, client_id: str):
+        """Notifica a todos los clientes que alguien se desconectó"""
+        msg = {
+            "type": "BROADCAST",
+            "event": "user_left",
+            "client_id": client_id,
+            "timestamp": utcnow_iso()
+        }
+        with self.clients_lock:
+            for cid, sock in self.clients.items():
+                if self.client_meta.get(cid, {}).get("kind") == "client":
+                    try:
+                        send_jsonline(sock, msg)
+                    except Exception as e:
+                        logging.error(f"Error broadcasting user_left a {cid}: {e}")
+        logging.info(f"📢 Broadcast: {client_id} se fue")
 
 
 def main():
