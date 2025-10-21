@@ -8,7 +8,7 @@ import time
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-
+from bson.binary import Binary  
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError
 import bcrypt
@@ -17,6 +17,15 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [AUTENTICACIÓN] - %(levelname)s - %(message)s'
 )
+def _to_bcrypt_bytes(v) -> bytes | None:
+    if v is None:
+        return None
+    if isinstance(v, (bytes, bytearray, Binary)):
+        return bytes(v)
+    if isinstance(v, str):
+        return v.encode("ascii", "ignore")
+    # fallback
+    return str(v).encode("ascii", "ignore")
 
 def now_utc() -> datetime:
     return datetime.utcnow()
@@ -32,8 +41,9 @@ class AutenticacionService:
     Servicio de Autenticación (users/sessions en usuarios_db).
     Acciones:
       - authenticate_user / login
-      - validate_session
-      - logout
+      - validate_session (opcional renew=true)
+      - logout (acepta session_id o token)
+      - whoami (nuevo)
       - create_user / update_user / delete_user / get_user
       - changePassword (alias de update_user)
     """
@@ -80,7 +90,40 @@ class AutenticacionService:
         self.users.create_index([("active", ASCENDING)])
         self.sessions.create_index([("session_id", ASCENDING)], unique=True)
         self.sessions.create_index([("active", ASCENDING)])
-        self.sessions.create_index([("expires_at", ASCENDING)])
+
+        # TTL REAL: borra doc automáticamente cuando expires_at < now
+        # Intentamos un índice TTL dedicado. Si ya existe uno sin TTL, lo recreamos.
+        try:
+            self.sessions.create_index([("expires_at", ASCENDING)], name="expires_at_ttl", expireAfterSeconds=0)
+        except Exception:
+            try:
+                self.sessions.drop_index("expires_at_1")
+            except Exception:
+                pass
+            try:
+                self.sessions.create_index([("expires_at", ASCENDING)], name="expires_at_ttl", expireAfterSeconds=0)
+            except Exception as e:
+                logging.warning(f"⚠️ No se pudo asegurar índice TTL en sessions: {e}")
+
+        # Seed admin opcional via ENV
+        self._seed_admin()
+
+    def _seed_admin(self):
+        seed_user = os.getenv("AUTH_SEED_ADMIN")
+        seed_pass = os.getenv("AUTH_SEED_PASSWORD")
+        if not seed_user or not seed_pass:
+            return
+        if self.users.find_one({"username": seed_user}):
+            logging.info("🔑 Seed admin ya existe (omitido)")
+            return
+        logging.info(f"🔑 Creando admin inicial '{seed_user}' por variables de entorno…")
+        self.users.insert_one({
+            "username": seed_user,
+            "password_hash": self._hash_password(seed_pass),
+            "role": "admin",
+            "active": True,
+            "created_at": now_utc(),
+        })
 
     # --------------- BUS (NDJSON) ---------------
     def connect(self) -> bool:
@@ -174,13 +217,20 @@ class AutenticacionService:
             if action in ("authenticate_user", "login"):
                 r = self._authenticate_user(payload)
                 if action == "login":
-                    # contrato clásico: { token, userType, userId }
+                    # => contrato unificado para la app:
                     if r.get("status") == "authenticated":
-                        res = {"token": r["session_id"],
-                               "userType": r.get("user",{}).get("role","user"),
-                               "userId": r.get("user",{}).get("username")}
+                        res = {
+                            "status": "ok",
+                            "session_id": r["session_id"],
+                            "role": r.get("user", {}).get("role", "user"),
+                            "username": r.get("user", {}).get("username"),
+                            # compat (por si algún cliente viejo lo usa):
+                            "token": r["session_id"],
+                            "userType": r.get("user", {}).get("role", "user"),
+                            "userId": r.get("user", {}).get("username"),
+                        }
                     else:
-                        res = {"status":"denied","message":r.get("message","")}
+                        res = {"status": "denied", "message": r.get("message", "")}
                 else:
                     res = r
 
@@ -190,12 +240,20 @@ class AutenticacionService:
             elif action == "logout":
                 res = self._logout(payload)
 
-            elif action in ("create_user","get_user","update_user","delete_user"):
+            elif action in ("create_user", "get_user", "update_user", "delete_user"):
                 res = getattr(self, f"_{action}")(payload)
 
             elif action == "changePassword":
-                res = self._update_user({"username": payload.get("userId") or payload.get("username"),
-                                         "password": payload.get("newPassword")})
+                res = self._update_user({
+                    "username": payload.get("userId") or payload.get("username"),
+                    "password": payload.get("newPassword")
+                })
+
+            elif action in ("whoami", "refresh_session"):
+                if action == "whoami":
+                    res = self._whoami(payload)
+                else:  # refresh_session
+                    res = self._validate_session({**payload, "renew": True})
 
             else:
                 res = {"status": "error", "message": f"acción desconocida: {action}"}
@@ -214,13 +272,17 @@ class AutenticacionService:
     # --------------- Lógica de dominio ---------------
     def _hash_password(self, raw: str) -> bytes:
         salt = bcrypt.gensalt(rounds=12)
-        return bcrypt.hashpw(raw.encode("utf-8"), salt)
+        return bcrypt.hashpw(raw.encode("utf-8"), salt)  # guardamos bytes (Binary)
 
-    def _check_password(self, raw: str, hashed: bytes) -> bool:
+    def _check_password(self, raw: str, hashed_any) -> bool:
         try:
+            hashed = _to_bcrypt_bytes(hashed_any)
+            if not hashed:
+                return False
             return bcrypt.checkpw(raw.encode("utf-8"), hashed)
         except Exception:
             return False
+
 
     def _authenticate_user(self, p: Dict[str, Any]) -> Dict[str, Any]:
         q = None
@@ -260,21 +322,45 @@ class AutenticacionService:
         }
 
     def _validate_session(self, p: Dict[str, Any]) -> Dict[str, Any]:
-        sid = p.get("session_id")
+        sid = p.get("session_id") or p.get("token")
+        if not sid:
+            return {"status": "error", "message": "falta session_id", "valid": False}
+        s = self.sessions.find_one({"session_id": sid, "active": True})
+        if not s:
+            return {"status": "invalid", "valid": False}
+        if s["expires_at"] < now_utc():
+            self.sessions.update_one({"_id": s["_id"]}, {"$set": {"active": False}})
+            return {"status": "expired", "valid": False}
+
+        if p.get("renew"):
+            new_exp = now_utc() + self.session_ttl
+            self.sessions.update_one({"_id": s["_id"]}, {"$set": {"expires_at": new_exp}})
+            s["expires_at"] = new_exp
+
+        return {
+            "status": "ok",
+            "valid": True,
+            "username": s.get("username"),
+            "role": s.get("role", "user"),
+            "expires_at": to_ts(s["expires_at"]),
+        }
+
+
+    def _whoami(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        sid = p.get("session_id") or p.get("token")
         if not sid:
             return {"status": "error", "message": "falta session_id"}
         s = self.sessions.find_one({"session_id": sid, "active": True})
         if not s:
             return {"status": "invalid"}
-        if s["expires_at"] < now_utc():
-            self.sessions.update_one({"_id": s["_id"]}, {"$set": {"active": False}})
-            return {"status": "expired"}
-        return {"status": "valid",
-                "user": {"username": s["username"], "role": s.get("role", "user")},
-                "expires_at": to_ts(s["expires_at"])}
+        return {
+            "status": "ok",
+            "user": {"username": s["username"], "role": s.get("role", "user")},
+            "expires_at": to_ts(s["expires_at"]),
+        }
 
     def _logout(self, p: Dict[str, Any]) -> Dict[str, Any]:
-        sid = p.get("session_id")
+        sid = p.get("session_id") or p.get("token")
         if not sid:
             return {"status": "error", "message": "falta session_id"}
         upd = self.sessions.update_one({"session_id": sid, "active": True}, {"$set": {"active": False}})
@@ -342,8 +428,10 @@ class AutenticacionService:
         self.running = False
         self.connected = False
         if self.socket is not None:
-            try: self.socket.close()
-            except: pass
+            try:
+                self.socket.close()
+            except:
+                pass
 
 def main():
     bus_host = os.getenv("BUS_HOST", "bus")
@@ -361,8 +449,10 @@ def main():
     )
     try:
         if svc.connect():
-            if run_tests: svc.test_communication()
-            while svc.connected: time.sleep(1)
+            if run_tests:
+                svc.test_communication()
+            while svc.connected:
+                time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

@@ -1,4 +1,3 @@
-# calls/Llamadas.py
 import socket, json, threading, logging, time, os
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -139,15 +138,15 @@ class LlamadasService:
             try:
                 action = (header.get("action") or payload.get("action") or "").strip()
                 if action == "record":
-                    resp = self._record_call(payload)  # resp: {"ok": True, "call": {...}}
+                    resp = self._record_call(payload)
                 else:
                     resp = {"ok": False, "error": f"Acción no soportada: {action}"}
             except Exception as e:
                 logging.exception("Fallo manejando REQUEST")
                 resp = {"ok": False, "error": str(e)}
 
-            envelope = {"ok": True, "data": resp} if resp.get("ok", False) else resp
-            self._respond_direct(sender, envelope, corr)
+            # DIRECT al cliente (Android espera el payload sin bloquear guardado)
+            self._respond_direct(sender, resp, corr)
             return
 
         if mtype == "DELIVERY_ACK":
@@ -169,26 +168,29 @@ class LlamadasService:
         status = (p.get("status") or "attempted").strip()
         duration = p.get("duration")
         caller = (p.get("callerId") or "unknown").strip()
+        depto = (p.get("depto") or "").strip()
         now_iso = datetime.utcnow().isoformat()
 
-        call_doc = {
-            "destination": destination,
-            "status": status,
-            "duration": duration,
-            "callerId": caller,
-            "ts": now_iso
-        }
-
-        # 🔔 Notificar registro (no bloquea la respuesta al móvil)
+        # 🔔 Notificar registro (no bloquea)
         self._notify_registro_llamadas({
             "destination": destination,
             "status": status,
             "duration": duration,
             "callerId": caller,
-            "timestamp": now_iso
+            "timestamp": now_iso,
+            "depto": depto or None
         })
 
-        return {"ok": True, "call": call_doc}
+        # ⬅️ Respuesta “amigable” para Android (status al top-level)
+        return {
+            "ok": True,
+            "status": status,
+            "destination": destination,
+            "duration": duration,
+            "callerId": caller,
+            "depto": depto or None,
+            "ts": now_iso
+        }
 
     # --------------- ciclo de vida ---------------
     def disconnect(self):

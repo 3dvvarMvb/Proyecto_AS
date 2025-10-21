@@ -1,392 +1,225 @@
 # Servicios/admin/Administrador.py
-import os
-import socket
-import json
-import threading
-import logging
-import time
-from typing import Dict, Any, Optional
-from collections import deque
-from pymongo import MongoClient
+import os, socket, json, threading, logging, time, secrets
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta, timezone
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import PyMongoError
+from bson.objectid import ObjectId
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [ADMINISTRACIÓN] - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [ADMINISTRACIÓN] - %(levelname)s - %(message)s')
 
-def _jsonline(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+def _jsonline(o: dict) -> bytes: return (json.dumps(o, ensure_ascii=False) + "\n").encode("utf-8")
+def _utcnow_iso() -> str: return datetime.now(timezone.utc).isoformat()
+def _to_iso(dt): 
+    if isinstance(dt, datetime):
+        try: return dt.astimezone(timezone.utc).isoformat()
+        except: return dt.isoformat()
+    return None
 
 class AdministracionService:
     """
-    Servicio de Administración conectado al BUS (NDJSON).
-    - Verifica admins (Mongo si está; si no, delega a Autenticación)
-    - Delegaciones administrativas a Autenticación
-    - Estado del sistema
+    Acciones:
+      verify_admin {username}
+      get_user_info {username}
+      admin_update_user {username, role?, active?, password?}
+      admin_delete_user {username}
+      generateReport {days?}
+      system_status
     """
+    def __init__(self,
+        client_id="administracion_service",
+        bus_host=os.getenv("BUS_HOST", "bus"),
+        bus_port=int(os.getenv("BUS_PORT", "5000")),
+        mongo_uri=os.getenv("MONGO_URI","mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin"),
+        users_db=os.getenv("USERS_DB","usuarios_db"),
+        calls_db=os.getenv("CALLS_DB","llamadas_db"),
+        msgs_db=os.getenv("MSGS_DB","mensajes_db"),
+        run_tests: bool=False):
+        self.client_id=client_id; self.bus_host=bus_host; self.bus_port=bus_port
+        self.mongo_uri=mongo_uri; self.users_db=users_db; self.calls_db=calls_db; self.msgs_db=msgs_db
+        self.socket: Optional[socket.socket]=None; self.connected=False; self.running=False
+        self._mongo: Optional[MongoClient]=None; self.users=None; self.calls=None; self.msgs=None
+        self._pending: Dict[str, Dict[str,Any]]={}; self._cv=threading.Condition()
+        self.run_tests=run_tests
 
-    def __init__(
-        self,
-        client_id: str = "administracion_service",
-        bus_host: str = os.getenv("BUS_HOST", "bus"),
-        bus_port: int = int(os.getenv("BUS_PORT", "5000")),
-        mongo_uri: Optional[str] = os.getenv(
-            "MONGO_URI",
-            "mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin"
-        ),
-        mongo_db: str = os.getenv("MONGO_DB", "arquitectura_software"),
-        run_tests: bool = False,
-    ):
-        self.client_id = client_id
-        self.bus_host = bus_host
-        self.bus_port = int(bus_port)
-        self.socket: Optional[socket.socket] = None
-        self.connected = False
-        self.running = False
-
-        # Mongo
-        self.mongo_uri = mongo_uri
-        self.mongo_db = mongo_db
-        self._db = None
-        self.users = None
-
-        # Cola de respuestas desde Autenticación
-        self._auth_cv = threading.Condition()
-        self._auth_queue: deque[Dict[str, Any]] = deque()
-
-        self.run_tests = run_tests
-
-    # --------------- Mongo (opcional) ---------------
+    # --- Mongo
     def _init_mongo(self):
         try:
-            if not self.mongo_uri or self._db is not None:
-                return
-            cli = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=4000)
-            cli.admin.command("ping")
-            self._db = cli[self.mongo_db]
-            self.users = self._db["users"]
+            if self._mongo: return
+            cli=MongoClient(self.mongo_uri, serverSelectionTimeoutMS=6000); cli.admin.command("ping")
+            self._mongo=cli
+            self.users=cli[self.users_db]["users"]; self.users.create_index([("username",ASCENDING)], unique=True)
+            self.calls=cli[self.calls_db]["llamadas"]; self.calls.create_index([("fecha",ASCENDING),("hora",ASCENDING)])
+            try: self.msgs=cli[self.msgs_db]["mensajes"]
+            except: self.msgs=None
             logging.info("✅ Mongo listo en Administración")
         except Exception as e:
-            logging.warning(f"⚠️ Administración sin Mongo (delegará en Autenticación): {e}")
-            self._db = None
-            self.users = None
+            logging.warning(f"⚠️ Administración sin Mongo (delegará): {e}")
+            self._mongo=None; self.users=None; self.calls=None; self.msgs=None
 
-    # --------------- BUS ---------------
-    def connect(self) -> bool:
+    # --- BUS
+    def connect(self)->bool:
         try:
             self._init_mongo()
-
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((self.bus_host, self.bus_port))
+            self.socket=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+            self.socket.connect((self.bus_host,self.bus_port))
             logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
-
-            register_message = {
-                'type': 'REGISTER',
-                'client_id': self.client_id,
-                'kind': 'service',
-                'service': 'Administracion'
-            }
-            # NDJSON
-            self.socket.sendall(_jsonline(register_message))
-
-            # Intento corto de esperar REGISTER_ACK (NDJSON)
-            self.socket.settimeout(1.5)
-            ack_ok = False
-            try:
-                buf = ""
-                while "\n" not in buf:
-                    chunk = self.socket.recv(4096).decode('utf-8')
-                    if not chunk:
-                        break
-                    buf += chunk
-                if "\n" in buf:
-                    line, rest = buf.split("\n", 1)
-                    if line.strip():
-                        ack = json.loads(line)
-                        if ack.get('type') == 'REGISTER_ACK' and ack.get('status') == 'success':
-                            ack_ok = True
-                            logging.info("✅ Registrado en el BUS como servicio 'Administracion'")
-            except socket.timeout:
-                logging.warning("⚠️ REGISTER_ACK no llegó a tiempo (continuamos de todos modos)")
-            finally:
-                self.socket.settimeout(None)
-
-            self.connected = True
-            self.running = True
-            threading.Thread(target=self._listen_messages, name="admin_listener", daemon=True).start()
-
-            if not ack_ok:
-                logging.info("ℹ️ Esperando mensajes del BUS (el ACK puede llegar vía listener)…")
+            self.socket.sendall(_jsonline({"type":"REGISTER","client_id":self.client_id,"kind":"service","service":"Administracion"}))
+            self.connected=True; self.running=True
+            threading.Thread(target=self._listen,daemon=True).start()
             logging.info("🚀 Servicio de Administración iniciado")
             return True
-
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}")
-            return False
+            logging.error(f"❌ Error conectando al BUS: {e}"); return False
 
-    # --------------- envío / respuesta ---------------
-    def _send(self, obj: dict) -> bool:
-        if not self.connected or not self.socket:
-            logging.error("❌ No conectado al BUS. No se puede enviar mensaje.")
-            return False
-        try:
-            obj.setdefault("sender", self.client_id)
-            self.socket.sendall(_jsonline(obj))  # NDJSON
-            return True
-        except Exception as e:
-            logging.error(f"❌ Error enviando mensaje: {e}")
-            self.connected = False
-            return False
+    def _send(self,obj:dict)->bool:
+        if not self.connected or not self.socket: return False
+        try: obj.setdefault("sender",self.client_id); self.socket.sendall(_jsonline(obj)); return True
+        except Exception as e: logging.error(f"❌ Error enviando: {e}"); self.connected=False; return False
 
-    def _reply(self, reply_to: str, payload: dict, corr: str | None = None):
-        """RESPUESTA estándar para solicitudes vía BUS."""
-        out = {'type': 'DIRECT', 'target': reply_to, 'payload': payload}
-        if corr:
-            out['header'] = {'correlationId': corr}
+    def _reply(self,target:str,data:dict,corr:Optional[str]):
+        payload={"ok": True, "data": data} if not data.get("ok") else data  # si ya viene con ok, respeta
+        out={"type":"DIRECT","target":target,"payload":payload,"service":"Administracion"}
+        if corr: out["header"]={"correlationId":corr}
         self._send(out)
 
-    # --------------- listener NDJSON ---------------
-    def _listen_messages(self):
+    def _listen(self):
         logging.info("👂 Iniciando escucha de mensajes del BUS...")
-        buf = ""
+        buf=""
         while self.running and self.connected and self.socket:
             try:
-                data = self.socket.recv(65536)
-                if not data:
-                    logging.warning("⚠️ Conexión cerrada por el BUS")
-                    self.connected = False
-                    break
-                buf += data.decode('utf-8')
+                chunk=self.socket.recv(65536)
+                if not chunk: self.connected=False; break
+                buf+=chunk.decode("utf-8")
                 while "\n" in buf:
-                    line, buf = buf.split("\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        msg = json.loads(line)
-                        self._handle_message(msg)
-                    except json.JSONDecodeError as e:
-                        logging.error(f"Error decodificando JSON NDJSON: {e}")
+                    line,buf=buf.split("\n",1); line=line.strip()
+                    if not line: continue
+                    try: self._handle(json.loads(line))
+                    except json.JSONDecodeError as e: logging.error(f"JSON NDJSON error: {e}")
             except Exception as e:
-                if self.running:
-                    logging.error(f"Error recibiendo mensaje: {e}")
-                    self.connected = False
+                if self.running: logging.error(f"Error recibiendo: {e}"); self.connected=False
                 break
         logging.info("🔇 Listener detenido")
 
-    # --------------- Manejo de mensajes ---------------
-    def _handle_message(self, message: dict):
-        mtype = message.get('type')
-        sender = message.get('sender', 'UNKNOWN')
-        logging.info(f"📩 Mensaje recibido - Tipo: {mtype}, De: {sender}")
-        logging.debug(f"Contenido: {message}")
+    def _handle(self,m:dict):
+        t=m.get("type"); sender=m.get("sender","UNKNOWN")
+        if t=="REQUEST":
+            h=m.get("header") or {}; p=(m.get("payload") or {}).copy(); corr=h.get("correlationId")
+            action=(h.get("action") or p.get("action") or "").strip();  p["action"]=action
+            try: res=self._exec(p)
+            except Exception as e: logging.exception("Error en REQUEST"); res={"ok":False,"error":str(e)}
+            self._reply(sender, res, corr); return
 
-        if mtype == 'INVOKE':
-            self._handle_invoke(message)
+        if t in ("DIRECT","RESPONSE") and sender=="autenticacion_service":
+            h=m.get("header") or {}; corr=h.get("correlationId")
+            if corr:
+                with self._cv:
+                    self._pending[corr]=m.get("payload",{}) or {}
+                    self._cv.notify_all()
             return
 
-        if mtype == 'REQUEST':
-            header = message.get('header') or {}
-            payload = (message.get('payload') or {}).copy()
-            corr = header.get('correlationId')
+        if t=="DELIVERY_ACK": logging.info(f"✅ Mensaje entregado a {m.get('target')}"); return
+        if t in ("BROADCAST","EVENT"): logging.info(f"📣 {t} de {sender}: {m.get('payload')}"); return
 
-            # ⭐ Combinar action del header con el payload
-            action = header.get('action') or payload.get('action')
-            if action:
-                payload['action'] = action
+    # --- acciones
+    def _exec(self,p:Dict[str,Any])->Dict[str,Any]:
+        a=p.get("action","")
+        if a=="verify_admin": return self._verify_admin(p)
+        if a=="get_user_info":
+            r=self._auth("get_user",{"username":p.get("username")})
+            if r.get("ok"): 
+                u=(r.get("data") or {}).get("user") or {}
+                if not u: return {"ok":False,"error":"not_found"}
+                return {"ok":True,"username":u.get("username"),"role":u.get("role","user"),
+                        "active":bool(u.get("active",True)),"created_at":u.get("created_at")}
+            return {"ok":False, "error": r.get("error") or r.get("message","auth_error")}
+        if a=="admin_update_user":
+            req={"username":p.get("username")}
+            if "role" in p: req["role"]=p["role"]
+            if "active" in p: req["active"]=bool(p["active"])
+            if p.get("password"): req["password"]=str(p["password"])
+            r=self._auth("update_user",req); return r if r.get("ok") else {"ok":False,**r}
+        if a=="admin_delete_user":
+            r=self._auth("delete_user",{"username":p.get("username")}); return r if r.get("ok") else {"ok":False,**r}
+        if a=="generateReport": return self._report(p)
+        if a=="system_status": return {"ok":True,"status":"ok","time":time.time()}
+        return {"ok":False,"error":f"acción desconocida: {a}"}
 
-            try:
-                res = self._execute_action(payload)
-                payload_out = {"ok": True, "response_to": payload, "data": res}
-            except Exception as e:
-                logging.exception("Error procesando REQUEST en Administración")
-                payload_out = {"ok": False, "response_to": payload, "error": str(e)}
-
-            self._reply(sender, payload_out, corr)
-            return
-
-
-        if mtype == 'RESPONSE':
-            payload = message.get('payload', {}) or {}
-            origin = sender
-            if origin == 'autenticacion_service':
-                with self._auth_cv:
-                    self._auth_queue.append(payload)
-                    self._auth_cv.notify()
-            else:
-                logging.info(f"📨 RESPONSE de {origin}: {payload}")
-            return
-
-        if mtype == 'DIRECT':
-            payload = message.get('payload', {}) or {}
-            origin = sender
-            if origin == 'autenticacion_service' and isinstance(payload, dict) and 'response_to' in payload:
-                with self._auth_cv:
-                    self._auth_queue.append(payload)
-                    self._auth_cv.notify()
-            else:
-                logging.info(f"📧 DIRECT de {origin}: {payload}")
-            return
-
-        if mtype == 'BROADCAST':
-            payload = message.get('payload', {}) or {}
-            logging.info(f"📣 BROADCAST de {sender}: {payload}")
-            return
-
-        if mtype == 'DELIVERY_ACK':
-            logging.info(f"✅ Mensaje entregado a {message.get('target')}")
-            return
-
-        if mtype == 'ERROR':
-            logging.error(f"❌ Error del BUS: {message.get('message')}")
-            return
-
-        logging.warning(f"Tipo no soportado: {mtype}")
-
-    # --------------- INVOKE ---------------
-    def _handle_invoke(self, msg: dict):
-        header = msg.get('header', {}) or {}
-        body = msg.get('payload', {}) or msg.get('body', {}) or {}
-        action = header.get('action') or body.get('action')
-        reply_to = header.get('replyTo') or msg.get('sender')
-        corr = header.get('correlationId')
-
-        try:
-            res = self._execute_action({"action": action, **body})
-            payload = {"ok": True, "response_to": {"action": action, **body}, "data": res}
-        except Exception as e:
-            logging.exception("Error procesando INVOKE")
-            payload = {"ok": False, "response_to": {"action": action, **body}, "error": str(e)}
-
-        self._reply(reply_to, payload, corr)
-
-    # --------------- Lógica de dominio ---------------
-    def _execute_action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        action = payload.get("action")
-        if action == "verify_admin":
-            return self._verify_admin(payload)
-        if action == "get_user_info":
-            return self._delegate_to_auth("get_user", {"username": payload.get("username")})
-        if action == "admin_create_user":
-            return self._delegate_to_auth("create_user", payload)
-        if action == "admin_update_user":
-            return self._delegate_to_auth("update_user", payload)
-        if action == "admin_delete_user":
-            return self._delegate_to_auth("delete_user", payload)
-        if action in ("admin_change_password", "change_password"):
-            return self._delegate_to_auth("changePassword", payload)
-        if action == "system_status":
-            return {"status": "ok", "time": time.time()}
-        return {"status": "error", "message": f"acción desconocida: {action}"}
-
-
-    def _verify_admin(self, p: Dict[str, Any]) -> Dict[str, Any]:
-        username = p.get("username") or p.get("admin_id")
-        if not username:
-            return {"status": "error", "message": "falta username/admin_id"}
-
-        # 1) Mongo directo si está disponible
+    def _verify_admin(self,p:Dict[str,Any])->Dict[str,Any]:
+        username=p.get("username") or p.get("admin_id")
+        if not username: return {"ok":False,"error":"falta username"}
         if self.users is not None:
-            u = self.users.find_one({"username": username})
-            if u is not None:
-                return {"status": "ok", "is_admin": u.get("role") == "admin", "active": u.get("active", True)}
-            logging.info("🔎 Usuario no hallado en Mongo local; probando fallback a Autenticación…")
+            try:
+                u=self.users.find_one({"username":username})
+                if u is not None:
+                    return {"ok":True,"username":username,"is_admin":u.get("role")=="admin","active":bool(u.get("active",True))}
+            except PyMongoError as e:
+                logging.warning(f"Mongo verify_admin falló: {e}")
+        r=self._auth("get_user",{"username":username}, timeout=6.0)
+        if not r.get("ok"): return {"ok":False,"error":"no se pudo verificar"}
+        u=(r.get("data") or {}).get("user")
+        if not u: return {"ok":False,"error":"not_found"}
+        return {"ok":True,"username":username,"is_admin":u.get("role")=="admin","active":bool(u.get("active",True))}
 
-        # 2) Fallback a Autenticación (timeout un poco mayor)
-        resp = self._delegate_to_auth("get_user", {"username": username}, timeout=6.0)
-        if not resp.get("ok"):
-            return {"status": "error", "message": "no se pudo verificar"}
-        user = resp.get("data", {}).get("user")
-        if not user:
-            return {"status": "not_found"}
-        return {"status": "ok", "is_admin": user.get("role") == "admin", "active": user.get("active", True)}
+    def _auth(self,action:str,payload:Dict[str,Any],timeout:float=5.0)->Dict[str,Any]:
+        corr=secrets.token_hex(8)
+        msg={"type":"REQUEST","header":{"service":"Autenticacion","action":action,"correlationId":corr},"payload":dict(payload or {})}
+        if not self._send(msg): return {"ok":False,"message":"fallo envío a Autenticación"}
+        deadline=time.time()+timeout
+        with self._cv:
+            while time.time()<deadline:
+                if corr in self._pending: return self._pending.pop(corr)
+                self._cv.wait(timeout=max(0.0,deadline-time.time()))
+        return {"ok":False,"message":"timeout esperando autenticación"}
 
-    # --------------- Delegación a Autenticación ---------------
-    def _delegate_to_auth(self, action: str, payload: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
-        """
-        IMPORTANTE: quitar/forzar 'action' para que NO pise la acción destino.
-        Además, mantenemos matching por 'action' y (si viene) 'username'.
-        """
-        # Clon + sanear
-        req_payload = dict(payload or {})
-        req_payload.pop("action", None)           # ← evita que pise
-        req_payload["action"] = action            # ← acción destino FINAL
-
-        ok = self._send({'type': 'REQUEST', 'target': 'autenticacion_service', 'payload': req_payload})
-        if not ok:
-            return {"ok": False, "message": "fallo envío a autenticación"}
-
-        deadline = time.time() + timeout
-        username = req_payload.get("username")
-
-        while time.time() < deadline:
-            with self._auth_cv:
-                if not self._auth_queue:
-                    remaining = max(0.0, deadline - time.time())
-                    self._auth_cv.wait(timeout=remaining)
-                    if not self._auth_queue:
-                        continue
-                resp = self._auth_queue.popleft()
-
-            rto = resp.get("response_to") or {}
-            if rto.get("action") == action:
-                if username is None or rto.get("username") == username:
-                    return resp
-
-            # No coincide, lo reencolamos y seguimos esperando
-            with self._auth_cv:
-                self._auth_queue.append(resp)
-            time.sleep(0.02)
-
-        return {"ok": False, "message": "timeout esperando autenticación"}
-
-    # --------------- Utilidades & ciclo de vida ---------------
-    def test_communication(self):
-        self._send({'type': 'BROADCAST', 'payload': {
-            'test': 'Administración activa', 'message': 'Supervisando', 'timestamp': time.time()
-        }})
+    def _report(self,p:Dict[str,Any])->Dict[str,Any]:
+        try: days=max(1,int(p.get("days",1)))
+        except: days=1
+        since=datetime.utcnow()-timedelta(days=days)
+        calls_total=None; by_status={}; top_deptos=[]; recent=[]
+        if self.calls is not None:
+            try:
+                q={"fecha":{"$gte":since}}
+                calls_total=self.calls.count_documents(q)
+                for d in self.calls.aggregate([{"$match":q},{"$group":{"_id":"$status","count":{"$sum":1}}}]):
+                    by_status[d["_id"] or "desconocido"]=d["count"]
+                for d in self.calls.aggregate([{"$match":q},{"$group":{"_id":"$depto","count":{"$sum":1}}},{"$sort":{"count":-1}},{"$limit":5}]):
+                    top_deptos.append({"depto":d["_id"],"count":d["count"]})
+                cur=self.calls.find(q).sort([("fecha",-1),("hora",-1)]).limit(20)
+                for d in cur:
+                    recent.append({"id":str(d.get("_id")),"fecha":_to_iso(d.get("fecha")),"hora":d.get("hora"),
+                                   "caller":d.get("caller"),"depto":d.get("depto"),"status":d.get("status"),
+                                   "destination":d.get("destination"),"duration":d.get("duration")})
+            except PyMongoError as e:
+                logging.warning(f"Mongo generateReport(calls) falló: {e}")
+        msgs_total=None
+        if self.msgs is not None:
+            try: msgs_total=self.msgs.count_documents({"fecha":{"$gte":since}})
+            except: msgs_total=None
+        return {"ok":True,"generated_at":_utcnow_iso(),"window_days":days,
+                "calls":{"total":calls_total,"by_status":by_status,"top_deptos":top_deptos,"recent":recent},
+                "messages":{"total":msgs_total}}
 
     def disconnect(self):
         logging.info("🔌 Desconectando del BUS...")
-        self.running = False
-        self.connected = False
+        self.running=False; self.connected=False
         if self.socket:
-            try:
-                self.socket.close()
-            except:
-                pass
-        logging.info("👋 Desconectado del BUS")
-
+            try: self.socket.close()
+            except: pass
+        if self._mongo:
+            try: self._mongo.close()
+            except: pass
+        logging.info("👋 Administración detenida")
 
 def main():
-    bus_host = os.getenv("BUS_HOST", "bus")
-    bus_port = int(os.getenv("BUS_PORT", "5000"))
-    mongo_uri = os.getenv("MONGO_URI", "mongodb://app_user:app_password_123@mongodb:27017/arquitectura_software?authSource=admin")
-    mongo_db = os.getenv("MONGO_DB", "arquitectura_software")
-    run_tests = os.getenv("RUN_TESTS", "0") == "1"
-
-    svc = AdministracionService(
-        client_id="administracion_service",
-        bus_host=bus_host,
-        bus_port=bus_port,
-        mongo_uri=mongo_uri,
-        mongo_db=mongo_db,
-        run_tests=run_tests
-    )
-
+    svc=AdministracionService()
     try:
         if svc.connect():
-            if run_tests:
-                svc.test_communication()
-            while svc.connected:
-                time.sleep(1)
-        else:
-            logging.error("❌ No se pudo iniciar el servicio")
+            while svc.connected: time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("\n⏹️ Deteniendo servicio...")
+        pass
     finally:
         svc.disconnect()
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
