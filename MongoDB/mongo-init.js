@@ -32,13 +32,17 @@ db.createCollection('contactos', {
     properties: {
       nombre:       { bsonType: "string" },
       departamento: { bsonType: "string" },
-      telefono:     { bsonType: "string" },
+      telefono:     { anyOf: [
+        { bsonType: "string" },
+        { bsonType: "array", items: { bsonType: "string" } }
+      ]},
       email:        { bsonType: "string" },
       tags:         { bsonType: "array", items: { bsonType: "string" } },
       createdAt:    { bsonType: "date" }
     }
   } }
 });
+
 db.contactos.createIndex({ departamento: 1, nombre: 1 });
 db.contactos.createIndex({ nombre: "text", departamento: "text" });
 db.contactos.insertMany([

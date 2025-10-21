@@ -1,22 +1,32 @@
-# calls/Registro_llamadas.py
 import socket, json, threading, logging, time, os, hashlib, re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [REGISTRO] - %(levelname)s - %(message)s")
 
+# ---------------- JSON utils ----------------
+def _to_jsonable(x):
+    """Convierte recursivamente ObjectId->str, datetime->ISO, etc."""
+    if isinstance(x, ObjectId):
+        return str(x)
+    if isinstance(x, datetime):
+        # ISO siempre en UTC
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=timezone.utc)
+        return x.isoformat()
+    if isinstance(x, dict):
+        return {k: _to_jsonable(v) for k, v in x.items() if v is not None}
+    if isinstance(x, (list, tuple)):
+        return [_to_jsonable(v) for v in x]
+    return x
+
 def _jsonline(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    return (json.dumps(_to_jsonable(obj), ensure_ascii=False) + "\n").encode("utf-8")
 
 # ---------- helpers ----------
 def to_object_id_any(v: Any) -> Optional[ObjectId]:
-    """Devuelve ObjectId desde:
-    - ObjectId directo
-    - string con 24 hex -> ObjectId(...)
-    - cualquier otro valor -> ObjectId(sha1(...)[0:24])  (determinístico)
-    """
     if v is None:
         return None
     if isinstance(v, ObjectId):
@@ -28,25 +38,28 @@ def to_object_id_any(v: Any) -> Optional[ObjectId]:
         return ObjectId(h)
 
 def map_status(v: str, duration: Any = None) -> str:
-    """Normaliza status al enum {recibida, rechazada, sin_respuesta}."""
     s = (v or "").strip().lower()
     if s in ("recibida", "rechazada", "sin_respuesta"):
         return s
-    # Heurística:
-    # - attempted / no_answer -> sin_respuesta
-    # - rejected / cancel -> rechazada
-    # - si duration > 0 -> recibida
     try:
         d = int(duration) if duration is not None else 0
     except Exception:
         d = 0
     if d > 0:
         return "recibida"
-    if s in ("attempted", "no_answer", "missed", "timeout"):
+    if s in ("attempted", "no_answer", "missed", "timeout", "pending", "ringing", "dialing", "failed", "busy"):
         return "sin_respuesta"
-    if s in ("rejected", "cancelled", "canceled", "busy"):
+    if s in ("rejected", "declined", "cancelled", "canceled"):
         return "rechazada"
     return "sin_respuesta"
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def millis(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
 
 class RegistroLlamadasService:
     def __init__(
@@ -54,7 +67,8 @@ class RegistroLlamadasService:
         client_id: str = os.getenv("CLIENT_ID", "registro_llamadas_service"),
         bus_host: str = os.getenv("BUS_HOST", "bus"),
         bus_port: int = int(os.getenv("BUS_PORT", "5000")),
-        mongo_uri: str = os.getenv("MONGO_URI", "mongodb://app_user:app_password_123@mongodb:27017/?authSource=admin"),
+        # Host 'mongo' como en tus logs/compose
+        mongo_uri: str = os.getenv("MONGO_URI", "mongodb://app_user:app_password_123@mongo:27017/llamadas_db?authSource=admin"),
         mongo_db: str = os.getenv("MONGO_DB", "llamadas_db"),
         mongo_coll: str = os.getenv("MONGO_COLL", "llamadas"),
     ):
@@ -79,6 +93,7 @@ class RegistroLlamadasService:
             self.db = cli[self.mongo_db]
             self.col = self.db[self.mongo_coll]
             self.col.create_index([("fecha", ASCENDING), ("hora", ASCENDING)])
+            self.col.create_index([("fecha", DESCENDING)])
             logging.info("✅ Mongo listo (Registro de llamadas)")
             return True
         except Exception as e:
@@ -156,7 +171,7 @@ class RegistroLlamadasService:
             return False
         try:
             d.setdefault("sender", self.client_id)
-            self.socket.sendall(_jsonline(d))
+            self.socket.sendall(_jsonline(d))  # <- SANITIZADO
             logging.info(f"📤 Mensaje enviado - Tipo: {d.get('type')}")
             return True
         except Exception as e:
@@ -170,31 +185,133 @@ class RegistroLlamadasService:
             out["header"] = {"correlationId": corr}
         self._send(out)
 
-    # ---------- Handler ----------
-    def _handle(self, m: Dict[str, Any]):
+    # ---------- Normalización de documentos ----------
+    def _doc_to_api(self, d: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(d)
+        out["id"] = str(out.pop("_id", out.get("_id", "")))
+        f = out.get("fecha")
+        if isinstance(f, datetime):
+            out["tsMillis"] = millis(f)
+            out["fecha"] = _to_jsonable(f)  # ISO
+        # asegurar callerId string
+        if isinstance(out.get("callerId"), ObjectId):
+            out["callerId"] = str(out["callerId"])
+        # alias duración para Android
+        if out.get("duracion") is None and out.get("durationSec") is not None:
+            out["duracion"] = int(out["durationSec"])
+        if out.get("durationSec") is None and out.get("duracion") is not None:
+            out["durationSec"] = int(out["duracion"])
+        return out
+
+    # ---------- Acciones ----------
+    def _save_call(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Schema:
+          required: fecha(date), hora(string), caller(string), depto(string), status
+          opcionales: destination, duracion(int), callerId(ObjectId)
+        """
+        destination = (p.get("destination") or "").strip()
+        duration = p.get("duration") or p.get("duracion") or p.get("durationSec")
+        try:
+            duration_i = int(duration) if duration is not None else None
+        except Exception:
+            duration_i = None
+
+        caller_id_raw = p.get("callerId")
+        caller_str = str(p.get("caller") or caller_id_raw or "android-device")
+
+        # ObjectId opcional (determinístico si no es válido)
+        try:
+            caller_oid = ObjectId(caller_id_raw) if caller_id_raw else None
+        except Exception:
+            caller_oid = ObjectId(hashlib.sha1(caller_str.encode("utf-8")).hexdigest()[:24])
+
+        # depto
+        depto = (p.get("depto") or "").strip()
+        if not depto:
+            if destination and re.fullmatch(r"[0-9A-Za-z\-]+", destination):
+                depto = destination
+            else:
+                depto = "N/A"
+
+        status = map_status(p.get("status"), duration_i)
+
+        now = now_utc()
+        hora = now.strftime("%H:%M:%S")
+
+        doc = {
+            "fecha": now,
+            "hora": hora,
+            "caller": caller_str,
+            "depto": depto,
+            "status": status,
+            "destination": destination or None,
+        }
+        if duration_i is not None:
+            # nombres que usa tu app
+            doc["duracion"] = duration_i
+            doc["durationSec"] = duration_i
+        if caller_oid is not None:
+            doc["callerId"] = caller_oid
+
+        res = self.col.insert_one(doc)
+        return {"ok": True, "id": str(res.inserted_id)}
+
+    def _list_calls(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        limit = max(1, min(int(p.get("limit", 50)), 200))
+        cur = self.col.find({}).sort([("fecha", DESCENDING), ("hora", DESCENDING)]).limit(limit)
+        items = [self._doc_to_api(d) for d in cur]
+        return {"ok": True, "items": items, "count": len(items)}
+
+    def _history(self, p: Dict[str, Any]) -> Dict[str, Any]:
+        q: Dict[str, Any] = {}
+        user_id = (p.get("userId") or "").strip()
+        depto = (p.get("depto") or "").strip()
+        if user_id:
+            oid = to_object_id_any(user_id)
+            q["$or"] = [{"caller": user_id}, {"callerId": oid}]
+        if depto:
+            q["depto"] = depto
+        limit = max(1, min(int(p.get("limit", 50)), 200))
+        cur = self.col.find(q).sort([("fecha", DESCENDING), ("hora", DESCENDING)]).limit(limit)
+        items = [self._doc_to_api(d) for d in cur]
+        return {"ok": True, "items": items, "count": len(items)}
+
+    # ---------- ciclo de vida ----------
+    def disconnect(self):
+        logging.info("🔌 Desconectando…")
+        self.running = False
+        self.connected = False
+        if self.socket:
+            try: self.socket.close()
+            except: pass
+        logging.info("👋 Registro detenido")
+        
+    def _handle(self, m: Dict[str, Any]) -> None:
         mtype = m.get("type")
         sender = m.get("sender", "UNKNOWN")
         logging.info(f"📩 Mensaje recibido - Tipo: {mtype}, De: {sender}")
 
         if mtype == "REQUEST":
-            payload = m.get("payload", {}) or {}
+            payload = m.get("payload") or {}
             header = m.get("header") or {}
-            corr = header.get("correlationId")
+            corr = (header.get("correlationId") if isinstance(header, dict) else None)
             action = (header.get("action") or payload.get("action") or "").strip()
 
             try:
-                if action == "save":
+                if action in ("save", "record"):
                     resp = self._save_call(payload)
-                elif action == "list":
+                elif action in ("list", "calls_list"):
                     resp = self._list_calls(payload)
+                elif action == "history":
+                    resp = self._history(payload)
                 else:
                     resp = {"ok": False, "error": f"Acción no soportada: {action}"}
             except Exception as e:
                 logging.exception("Fallo manejando REQUEST")
                 resp = {"ok": False, "error": str(e)}
 
-            envelope = {"ok": True, "data": resp} if resp.get("ok", False) else resp
-            self._respond_direct(sender, envelope, corr)
+            self._respond_direct(sender, resp, corr)
             return
 
         if mtype == "DELIVERY_ACK":
@@ -207,87 +324,6 @@ class RegistroLlamadasService:
 
         logging.debug(f"(ignorado) {m}")
 
-    # ---------- Acciones ----------
-    def _save_call(self, p: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Normaliza al schema:
-        required: fecha(date), hora(string), caller(string), depto(string), status(enum)
-        opcionales: destination, duration, callerId(ObjectId)
-        """
-        # 1) Campos base desde el payload
-        destination = (p.get("destination") or "").strip()
-        duration = p.get("duration")
-        caller_id_raw = p.get("callerId")  # puede venir string
-        # Para cumplir el schema: caller debe ser STRING
-        # - Si viene callerId, lo usamos como texto para 'caller'.
-        # - Si no viene, usamos 'android-device' o lo que venga en callerId/caller.
-        caller_str = str(caller_id_raw or p.get("caller") or "android-device")
-
-        # (Opcional) también calculamos un ObjectId determinístico para guardarlo en callerId
-        # sin romper el schema (callerId no es requerido).
-        try:
-            caller_oid = ObjectId(caller_id_raw) if caller_id_raw else None
-        except Exception:
-            import hashlib
-            caller_oid = ObjectId(hashlib.sha1(caller_str.encode("utf-8")).hexdigest()[:24])
-
-        # 2) depto: si viene, úsalo; si no, intenta derivarlo; si no, "N/A"
-        import re
-        depto = (p.get("depto") or "").strip()
-        if not depto:
-            if destination and re.fullmatch(r"[0-9A-Za-z\-]+", destination):
-                depto = destination
-            else:
-                depto = "N/A"
-
-        # 3) status normalizado (schema acepta: recibida | rechazada | sin_respuesta)
-        status = map_status(p.get("status"), duration)
-
-        # 4) fecha/hora (UTC)
-        now = datetime.utcnow()
-        fecha = now              # Date nativo
-        hora = now.strftime("%H:%M:%S")
-
-        # 5) Documento final que cumple el $jsonSchema
-        doc = {
-            "fecha": fecha,          # date
-            "hora": hora,            # string
-            "caller": caller_str,    # <- string requerido por el schema
-            "depto": depto,          # string
-            "status": status,        # enum válido
-            # extras (opcionales)
-            "destination": destination,
-            "duration": duration,
-        }
-        # Guardamos callerId solo si lo calculamos (no es requerido)
-        if caller_oid is not None:
-            doc["callerId"] = caller_oid
-
-        res = self.col.insert_one(doc)
-        return {"ok": True, "id": str(res.inserted_id)}
-
-
-    def _list_calls(self, p: Dict[str, Any]) -> Dict[str, Any]:
-        limit = max(1, min(int(p.get("limit", 50)), 200))
-        cur = self.col.find({}).sort([("fecha", -1), ("hora", -1)]).limit(limit)
-        items = []
-        for d in cur:
-            d["id"] = str(d.pop("_id"))
-            # serialización simple de fecha
-            if isinstance(d.get("fecha"), datetime):
-                d["fecha"] = d["fecha"].isoformat()
-            items.append(d)
-        return {"ok": True, "items": items, "count": len(items)}
-
-    # ---------- ciclo de vida ----------
-    def disconnect(self):
-        logging.info("🔌 Desconectando…")
-        self.running = False
-        self.connected = False
-        if self.socket:
-            try: self.socket.close()
-            except: pass
-        logging.info("👋 Registro detenido")
 
 def main():
     svc = RegistroLlamadasService()
