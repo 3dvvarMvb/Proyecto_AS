@@ -1,0 +1,25 @@
+
+Registro de Clientes (chats)
+--------------------------------------------------------------   
+
+2025-10-17 12:11:24,988 - [BUS] - INFO - ✅ Registrado: id=chat_b6727dfb kind=client service=None desde ('172.18.0.1', 48028)
+2025-10-17 12:11:24,988 - [BUS] - INFO - 📢 Broadcast: chat_b6727dfb se unió
+2025-10-17 12:11:25,503 - [BUS] - INFO - 📨 chat_b6727dfb → BUS : REQUEST
+2025-10-17 12:11:25,503 - [BUS] - INFO - 📤 chat_b6727dfb → mensajeria_service : REQUEST
+2025-10-17 12:11:25,529 - [BUS] - INFO - 📨 mensajeria_service → BUS : DIRECT
+2025-10-17 12:11:25,529 - [BUS] - INFO - 📤 mensajeria_service → chat_b6727dfb : DIRECT
+2025-10-17 12:11:25,609 - [BUS] - INFO - 📨 chat_b6727dfb → BUS : BROADCAST
+2025-10-17 12:11:35,625 - [BUS] - INFO - 📨 chat_b6727dfb → BUS : BROADCAST
+2025-10-17 12:11:44,912 - [BUS] - INFO - ✅ Registrado: id=chat_c0cfe335 kind=client service=None desde ('172.18.0.1', 41828)
+2025-10-17 12:11:44,912 - [BUS] - INFO - 📢 Broadcast: chat_c0cfe335 se unió
+2025-10-17 12:11:44,916 - [BUS] - INFO - 📨 chat_b6727dfb → BUS : BROADCAST
+2025-10-17 12:11:45,413 - [BUS] - INFO - 📨 chat_c0cfe335 → BUS : REQUEST
+2025-10-17 12:11:45,414 - [BUS] - INFO - 📤 chat_c0cfe335 → mensajeria_service : REQUEST
+2025-10-17 12:11:45,414 - [BUS] - INFO - 📨 mensajeria_service → BUS : DIRECT
+2025-10-17 12:11:45,415 - [BUS] - INFO - 📤 mensajeria_service → chat_c0cfe335 : DIRECT
+2025-10-17 12:11:45,514 - [BUS] - INFO - 📨 chat_c0cfe335 → BUS : BROADCAST
+2025-10-17 12:11:45,627 - [BUS] - INFO - 📨 chat_b6727dfb → BUS : BROADCAST
+
+--------------------------------------------------------------
+Intercambio de mensajes
+--------------------------------------------------------------

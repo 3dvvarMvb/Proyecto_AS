@@ -184,18 +184,28 @@ class InteractiveChatClient:
             msg_from = data.get('from', '')
             msg_text = data.get('text', '')
             timestamp = data.get('timestamp', '')
+            message_id = data.get('messageId', '')  # ✅ Capturar message_id
             
             # Guardar en historial
             self.conversation_history.append({
                 'from': msg_from,
                 'text': msg_text,
                 'timestamp': timestamp,
-                'direction': 'received'
+                'direction': 'received',
+                'message_id': message_id  # ✅ Guardar ID
             })
             
             # Mostrar en consola
             print(f"\n💬 {self.other_username or msg_from[:8]}: {msg_text}")
             print(f"{'✍️  ' + self.other_username + ' está escribiendo...' if self.is_other_typing else ''}> ", end='', flush=True)
+            
+            # ✅ Marcar como leído automáticamente si estamos en chat activo con ese usuario
+            if message_id and msg_from == self.other_user_id:
+                # Enviar en un thread para no bloquear
+                threading.Thread(
+                    target=lambda: self.mark_as_read(message_id), 
+                    daemon=True
+                ).start()
             
         elif event == "user_typing":
             user_typing = data.get('user_id', '')
@@ -208,6 +218,13 @@ class InteractiveChatClient:
                     print("> ", end='', flush=True)
                     
         elif event == "message_read":
+            msg_id = data.get('messageId', '')
+            # ✅ Actualizar el historial local para marcar el mensaje como leído
+            for msg in self.conversation_history:
+                if msg.get('message_id') == msg_id and msg.get('direction') == 'sent':
+                    msg['read'] = True
+                    break
+            
             print(f"\n✓✓ Mensaje leído")
             print("> ", end='', flush=True)
     
@@ -263,7 +280,8 @@ class InteractiveChatClient:
                     'from': self.user_id,
                     'text': message,
                     'timestamp': payload.get('timestamp', ''),
-                    'direction': 'sent'
+                    'direction': 'sent',
+                    'message_id': payload.get('messageId', '')  # ✅ Guardar ID del mensaje enviado
                 })
                 return True
             else:
@@ -274,7 +292,7 @@ class InteractiveChatClient:
             return False
     
     def get_conversation(self, other_user_id: str):
-        """Obtiene conversación"""
+        """Obtiene conversación y marca mensajes recibidos como leídos"""
         try:
             payload = self._send_action("getConversation", {
                 "user1ObjId": self.user_id,
@@ -284,14 +302,36 @@ class InteractiveChatClient:
             
             if payload.get("ok"):
                 messages = payload.get("messages", [])
+                unread_message_ids = []
+                
                 # Cargar historial
                 for msg in messages:
                     self.conversation_history.append({
                         'from': msg.get('from'),
                         'text': msg.get('text'),
                         'timestamp': msg.get('ts'),
-                        'direction': 'sent' if msg.get('from') == self.user_id else 'received'
+                        'direction': 'sent' if msg.get('from') == self.user_id else 'received',
+                        'message_id': msg.get('id')
                     })
+                    
+                    # ✅ Recopilar mensajes no leídos que son para mí
+                    if (msg.get('from') == other_user_id and 
+                        msg.get('to') == self.user_id and 
+                        msg.get('readStatus') == 'no_leido'):
+                        unread_message_ids.append(msg.get('id'))
+                
+                # ✅ Marcar todos los mensajes no leídos en batch
+                if unread_message_ids:
+                    def mark_all_as_read():
+                        for msg_id in unread_message_ids:
+                            try:
+                                self.mark_as_read(msg_id)
+                                time.sleep(0.1)  # Pequeño delay entre peticiones
+                            except:
+                                pass
+                    
+                    threading.Thread(target=mark_all_as_read, daemon=True).start()
+                
                 return messages
             else:
                 return []
@@ -308,6 +348,15 @@ class InteractiveChatClient:
             }, optional=True)
         except:
             pass
+    
+    def mark_as_read(self, message_id: str):
+        """Marca un mensaje como leído enviando REQUEST al servicio de Mensajería"""
+        try:
+            response = self._send_action("markRead", {"messageId": message_id}, optional=True)
+            if response.get("ok"):
+                pass  # Silencioso - el servicio notificará al remitente
+        except Exception as e:
+            pass  # Silencioso para no interrumpir el flujo
     
     def get_online_users_list(self):
         """Obtiene lista formateada de usuarios online"""

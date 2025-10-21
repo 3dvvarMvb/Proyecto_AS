@@ -1,9 +1,13 @@
 import socket, json, threading, logging, time, os, hashlib
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional, Any, Dict, Set
 from pymongo import MongoClient, ASCENDING
 from bson.objectid import ObjectId
 from collections import defaultdict
+
+# ✅ Zona horaria de Chile
+zona_chile = ZoneInfo("America/Santiago")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MENSAJERÍA] - %(levelname)s - %(message)s')
 
@@ -108,7 +112,7 @@ class MensajeriaService:
     def _heartbeat_monitor(self):
         while self.running:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(zona_chile)
                 with self.users_lock:
                     offline_users = []
                     for user_id, info in self.online_users.items():
@@ -127,7 +131,7 @@ class MensajeriaService:
     def _typing_timeout_monitor(self):
         while self.running:
             try:
-                now = datetime.utcnow()
+                now = datetime.now(zona_chile)
                 with self.typing_lock:
                     for conv_id, users in list(self.typing_status.items()):
                         for user_id, timestamp in list(users.items()):
@@ -227,7 +231,7 @@ class MensajeriaService:
             was_offline = user_id not in self.online_users
             self.online_users[user_id] = {
                 "client_id": client_id,
-                "last_seen": datetime.utcnow(),
+                "last_seen": datetime.now(zona_chile),
                 "status": "online"
             }
             if was_offline:
@@ -255,7 +259,7 @@ class MensajeriaService:
                 if user_id:
                     with self.users_lock:
                         if user_id in self.online_users:
-                            self.online_users[user_id]["last_seen"] = datetime.utcnow()
+                            self.online_users[user_id]["last_seen"] = datetime.now(zona_chile)
                 self._reply(sender, {"ok": True, "pong": True}, corr)
 
             # ✅ Conectar usuario
@@ -285,11 +289,11 @@ class MensajeriaService:
                         if is_typing:
                             if conversation_id not in self.typing_status:
                                 self.typing_status[conversation_id] = {}
-                            self.typing_status[conversation_id][user_id] = datetime.utcnow()
+                            self.typing_status[conversation_id][user_id] = datetime.now(zona_chile)
                         else:
                             if conversation_id in self.typing_status:
                                 self.typing_status[conversation_id].pop(user_id, None)
-                    
+                     
                     self._broadcast_typing_status(conversation_id, user_id, is_typing)
                     self._reply(sender, {"ok": True}, corr)
     
@@ -299,7 +303,7 @@ class MensajeriaService:
                     self._reply(sender, {"ok": False, "error": "Mongo no inicializado"}, corr)
                     return
                     
-                now = datetime.utcnow()
+                now = datetime.now(zona_chile)
                 sender_oid   = to_object_id_any(p.get("senderObjId")   or p.get("senderId"))
                 receiver_oid = to_object_id_any(p.get("receiverObjId") or p.get("receiverId"))
                 
@@ -432,7 +436,7 @@ class MensajeriaService:
                         "roomId": room_id,
                         "from": user_id,
                         "text": message,
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(zona_chile).isoformat()
                     }, exclude_user=user_id)
                     self._reply(sender, {"ok": True}, corr)
 
