@@ -9,7 +9,8 @@ from collections import defaultdict
 # ✅ Zona horaria de Chile
 zona_chile = ZoneInfo("America/Santiago")
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MENSAJERÍA] - %(levelname)s - %(message)s')
+# ✅ Logging solo para mensajes importantes
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MENSAJERÍA] - %(message)s')
 
 def send_jsonline(sock: socket.socket, obj: dict):
     sock.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -94,12 +95,13 @@ class MensajeriaService:
                 self.connected = True
                 self.running = True
                 
+                logging.info(f"✅ Servicio de Mensajería registrado en el BUS")
+                
                 # ✅ Iniciar threads de gestión
                 threading.Thread(target=self._listen_messages, daemon=True).start()
                 threading.Thread(target=self._heartbeat_monitor, daemon=True).start()
                 threading.Thread(target=self._typing_timeout_monitor, daemon=True).start()
                 
-                logging.info("✅ Registrado exitosamente en el BUS")
                 return True
             else:
                 logging.error(f"❌ Error en registro: {ack}")
@@ -147,7 +149,7 @@ class MensajeriaService:
                 logging.error(f"Error en typing monitor: {e}")
 
     def _listen_messages(self):
-        logging.info("👂 Iniciando escucha de mensajes del BUS...")
+        logging.info("👂 Servicio de mensajería escuchando...")
         buf = ""
         while self.running and self.connected:
             try:
@@ -155,17 +157,24 @@ class MensajeriaService:
                 if not chunk:
                     self.connected = False
                     break
+                
                 buf += chunk
+                
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
                     line = line.strip()
                     if not line:
                         continue
-                    message = json.loads(line)
-                    self._handle_message(message)
+                    
+                    try:
+                        message = json.loads(line)
+                        self._handle_message(message)
+                    except json.JSONDecodeError as je:
+                        logging.error(f"❌ Error parseando JSON: {je}")
+                        
             except Exception as e:
                 if self.running:
-                    logging.error(f"Error recibiendo: {e}")
+                    logging.error(f"❌ Error en socket: {e}")
                     self.connected = False
                 break
         logging.info("🔇 Listener detenido")
@@ -176,8 +185,17 @@ class MensajeriaService:
         
         if mtype == "REQUEST":
             payload = message.get("payload", {}) or {}
-            corr = (message.get("header") or {}).get("correlationId")
-            self._route_request(sender, payload, corr)
+            header = message.get("header") or {}
+            corr = header.get("correlationId")
+            # ✅ El action puede venir en header o en payload
+            action = header.get("action") or payload.get("action")
+            self._route_request(sender, payload, corr, action)
+        elif mtype == "BROADCAST":
+            pass  # Ignorar broadcasts silenciosamente
+        elif mtype == "DIRECT":
+            pass  # Ignorar directs silenciosamente
+        else:
+            logging.warning(f"⚠️ Tipo de mensaje desconocido: {mtype}")
 
     def _reply(self, target: str, payload: dict, corr: Optional[str] = None):
         msg = { "type": "DIRECT", "target": target, "payload": payload }
@@ -198,7 +216,6 @@ class MensajeriaService:
                         "event": event_type,
                         "data": data
                     })
-                    logging.info(f"📤 Evento '{event_type}' enviado a usuario {user_id[:8]}... (client: {client_id})")
                 except Exception as e:
                     logging.error(f"❌ Error enviando evento a {user_id}: {e}")
         else:
@@ -250,8 +267,10 @@ class MensajeriaService:
         # Aquí podrías consultar contactos del usuario y notificarles
         pass
 
-    def _route_request(self, sender: str, p: dict, corr: Optional[str] = None):
-        act = p.get("action")
+    def _route_request(self, sender: str, p: dict, corr: Optional[str] = None, action: Optional[str] = None):
+        # ✅ El action puede venir como parámetro o dentro del payload
+        act = action or p.get("action")
+        
         try:
             # ✅ Heartbeat
             if act == "heartbeat":
@@ -307,9 +326,6 @@ class MensajeriaService:
                 sender_oid   = to_object_id_any(p.get("senderObjId")   or p.get("senderId"))
                 receiver_oid = to_object_id_any(p.get("receiverObjId") or p.get("receiverId"))
                 
-                # ✅ Agregar logs para debugging
-                logging.info(f"📨 Enviando mensaje: {str(sender_oid)[:8]}... → {str(receiver_oid)[:8]}...")
-                
                 doc = {
                     "fecha": now,
                     "hora": now.strftime("%H:%M:%S"),
@@ -329,14 +345,10 @@ class MensajeriaService:
                     "timestamp": now.isoformat()
                 }, corr)
                 
-                # ✅ Log antes de notificar
-                receiver_str = str(receiver_oid)
-                logging.info(f"🔔 Intentando notificar a usuario {receiver_str[:8]}...")
-                
-                with self.users_lock:
-                    logging.info(f"📋 Usuarios online: {list(self.online_users.keys())}")
-                
                 # ✅ Notificar al destinatario en tiempo real
+                receiver_str = str(receiver_oid)
+                logging.info(f"� {str(sender_oid)[:8]}... → {receiver_str[:8]}...: {p.get('message', '')[:50]}")
+                
                 self._broadcast_to_user(receiver_str, "new_message", {
                     "messageId": str(mid),
                     "from": str(sender_oid),
@@ -404,6 +416,62 @@ class MensajeriaService:
                     "messages": items, 
                     "hasMore": len(items) == lim
                 }, corr)
+
+            # ✅ Obtener TODOS los mensajes de la BD
+            elif act == "get_all_messages":
+                if self.msgs is None:
+                    self._reply(sender, {"ok": False, "error": "Mongo no inicializado"}, corr)
+                    return
+                
+                try:
+                    # Parámetros opcionales
+                    limit = int(p.get("limit", 1000))  # Límite por defecto: 1000
+                    skip = int(p.get("skip", 0))       # Para paginación
+                    sort_order = p.get("sortOrder", "desc")  # "asc" o "desc"
+                    
+                    # Filtros opcionales
+                    filters = {}
+                    if p.get("senderId"):
+                        filters["sender"] = to_object_id_any(p.get("senderId"))
+                    if p.get("receiverId"):
+                        filters["receiver"] = to_object_id_any(p.get("receiverId"))
+                    if p.get("readStatus"):
+                        filters["readStatus"] = p.get("readStatus")
+                    if p.get("deliveryStatus"):
+                        filters["deliveryStatus"] = p.get("deliveryStatus")
+                    
+                    # Consultar base de datos
+                    sort_direction = -1 if sort_order == "desc" else 1
+                    cursor = self.msgs.find(filters).sort("fecha", sort_direction).skip(skip).limit(limit)
+                    
+                    # Formatear resultados
+                    messages = []
+                    for doc in cursor:
+                        messages.append({
+                            "id": str(doc["_id"]),
+                            "from": str(doc.get("sender")),
+                            "to": str(doc.get("receiver")),
+                            "text": doc.get("mensaje", ""),
+                            "timestamp": doc["fecha"].isoformat(),
+                            "hora": doc.get("hora", ""),
+                            "deliveryStatus": doc.get("deliveryStatus", "sent"),
+                            "readStatus": doc.get("readStatus", "unread")
+                        })
+                    
+                    # Contar total de documentos (para paginación)
+                    total_count = self.msgs.count_documents(filters)
+                    
+                    self._reply(sender, {
+                        "ok": True,
+                        "messages": messages,
+                        "total": total_count,
+                        "count": len(messages),
+                        "hasMore": (skip + len(messages)) < total_count
+                    }, corr)
+                    
+                except Exception as e:
+                    logging.error(f"❌ Error obteniendo todos los mensajes: {e}")
+                    self._reply(sender, {"ok": False, "error": str(e)}, corr)
 
             # ✅ Unirse a sala/canal
             elif act == "joinRoom":

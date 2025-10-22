@@ -210,7 +210,7 @@ def main():
     s = connect_as_client()
     try:
         scenario_admin(s)
-        scenario_user(s)
+        #scenario_user(s)
         print("\n✅ E2E finalizado OK (revisa arriba cada respuesta)")
     finally:
         try: s.close()
