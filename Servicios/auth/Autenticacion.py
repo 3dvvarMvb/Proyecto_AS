@@ -114,9 +114,9 @@ class AutenticacionService:
         if not seed_user or not seed_pass:
             return
         if self.users.find_one({"username": seed_user}):
-            logging.info("🔑 Seed admin ya existe (omitido)")
+            logging.info("Seed admin ya existe (omitido)")
             return
-        logging.info(f"🔑 Creando admin inicial '{seed_user}' por variables de entorno…")
+        logging.info(f"Creando admin inicial '{seed_user}' por variables de entorno…")
         self.users.insert_one({
             "username": seed_user,
             "password_hash": self._hash_password(seed_pass),
@@ -131,7 +131,7 @@ class AutenticacionService:
             self._init_mongo()
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.bus_host, self.bus_port))
-            logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
+            logging.info(f"Conectando al BUS en {self.bus_host}:{self.bus_port}")
 
             register_message = {'type': 'REGISTER', 'client_id': self.client_id,
                                 'kind': 'service', 'service': 'Autenticacion'}
@@ -148,21 +148,21 @@ class AutenticacionService:
 
             if ack.get('type') == 'REGISTER_ACK' and ack.get('status') == 'success':
                 self.connected = True
-                logging.info(f"✅ Registrado exitosamente en el BUS")
+                logging.info(f"Registrado exitosamente en el BUS")
                 self.running = True
                 threading.Thread(target=self._listen_messages, name="auth_listener", daemon=True).start()
-                logging.info("🚀 Servicio de Autenticación iniciado")
+                logging.info("Servicio de Autenticación iniciado")
                 return True
             else:
-                logging.error(f"❌ Error en registro: {ack}")
+                logging.error(f"Error en registro: {ack}")
                 return False
 
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}")
+            logging.error(f"Error conectando al BUS: {e}")
             return False
 
     def _listen_messages(self):
-        logging.info("👂 Iniciando escucha de mensajes del BUS...")
+        logging.info("Iniciando escucha de mensajes del BUS...")
         buf = ""
         while self.running and self.connected:
             try:
@@ -186,7 +186,7 @@ class AutenticacionService:
                     logging.error(f"Error recibiendo mensaje: {e}")
                     self.connected = False
                 break
-        logging.info("🔇 Listener detenido")
+        logging.info("Listener detenido")
 
     def _handle_message(self, message: dict):
         mtype = message.get('type')
@@ -202,13 +202,13 @@ class AutenticacionService:
             self._route_request(sender, payload, corr)
 
         elif mtype == 'DIRECT':
-            logging.info(f"📧 DIRECT de {sender}: {message.get('payload', {})}")
+            logging.info(f"DIRECT de {sender}: {message.get('payload', {})}")
         elif mtype == 'BROADCAST':
-            logging.info(f"📣 BROADCAST de {sender}: {message.get('payload', {})}")
+            logging.info(f"BROADCAST de {sender}: {message.get('payload', {})}")
         elif mtype == 'DELIVERY_ACK':
-            logging.info(f"✅ Mensaje entregado a {message.get('target')}")
+            logging.info(f"Mensaje entregado a {message.get('target')}")
         elif mtype == 'ERROR':
-            logging.error(f"❌ Error del BUS: {message.get('message')}")
+            logging.error(f"Error del BUS: {message.get('message')}")
 
     # --------------- Ruteo de acciones ---------------
     def _route_request(self, sender: str, payload: Dict[str, Any], corr: Optional[str] = None):

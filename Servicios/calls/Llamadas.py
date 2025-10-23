@@ -25,7 +25,7 @@ class LlamadasService:
     def connect_bus(self) -> bool:
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
+            logging.info(f"Conectando al BUS en {self.bus_host}:{self.bus_port}")
             self.socket.connect((self.bus_host, self.bus_port))
 
             reg = {"type": "REGISTER", "client_id": self.client_id, "kind": "service", "service": "Llamadas"}
@@ -52,25 +52,25 @@ class LlamadasService:
                         self.connected = True
                         self.running = True
                         threading.Thread(target=self._listen, daemon=True).start()
-                        logging.info("✅ Registrado en BUS como servicio 'Llamadas'")
-                        logging.info("🚀 Servicio de Llamadas iniciado correctamente")
+                        logging.info("Registrado en BUS como servicio 'Llamadas'")
+                        logging.info("Servicio de Llamadas iniciado correctamente")
                         return True
 
-            logging.error(f"❌ Error de registro BUS: {buf!r}")
+            logging.error(f"Error de registro BUS: {buf!r}")
             return False
 
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}")
+            logging.error(f"Error conectando al BUS: {e}")
             return False
 
     def _listen(self):
-        logging.info("👂 Iniciando escucha de mensajes del BUS...")
+        logging.info("Iniciando escucha de mensajes del BUS...")
         buf = ""
         while self.running and self.connected:
             try:
                 data = self.socket.recv(65536)
                 if not data:
-                    logging.warning("⚠️ Conexión cerrada por el BUS")
+                    logging.warning("Conexión cerrada por el BUS")
                     self.connected = False
                     break
                 buf += data.decode("utf-8")
@@ -89,19 +89,19 @@ class LlamadasService:
                     logging.error(f"Error recibiendo: {e}")
                     self.connected = False
                 break
-        logging.info("🔇 Listener detenido")
+        logging.info("Listener detenido")
 
     def _send(self, d: Dict[str, Any]) -> bool:
         if not self.connected:
-            logging.error("❌ No conectado al BUS")
+            logging.error("No conectado al BUS")
             return False
         try:
             d.setdefault("sender", self.client_id)
             self.socket.sendall(_jsonline(d))
-            logging.info(f"📤 Mensaje enviado - Tipo: {d.get('type')}")
+            logging.info(f"Mensaje enviado - Tipo: {d.get('type')}")
             return True
         except Exception as e:
-            logging.error(f"❌ Error enviando: {e}")
+            logging.error(f"Error enviando: {e}")
             self.connected = False
             return False
 
@@ -128,7 +128,7 @@ class LlamadasService:
     def _handle(self, m: Dict[str, Any]):
         mtype = m.get("type")
         sender = m.get("sender", "UNKNOWN")
-        logging.info(f"📩 Mensaje recibido - Tipo: {mtype}, De: {sender}")
+        logging.info(f"Mensaje recibido - Tipo: {mtype}, De: {sender}")
 
         if mtype == "REQUEST":
             payload = m.get("payload", {}) or {}
@@ -150,7 +150,7 @@ class LlamadasService:
             return
 
         if mtype == "DELIVERY_ACK":
-            logging.info(f"✅ Entregado a {m.get('target')}")
+            logging.info(f"Entregado a {m.get('target')}")
             return
 
         if mtype in ("DIRECT", "BROADCAST", "EVENT"):
@@ -171,7 +171,7 @@ class LlamadasService:
         depto = (p.get("depto") or "").strip()
         now_iso = datetime.utcnow().isoformat()
 
-        # 🔔 Notificar registro (no bloquea)
+        # Notificar registro (no bloquea)
         self._notify_registro_llamadas({
             "destination": destination,
             "status": status,
@@ -181,7 +181,7 @@ class LlamadasService:
             "depto": depto or None
         })
 
-        # ⬅️ Respuesta “amigable” para Android (status al top-level)
+        # Respuesta "amigable" para Android (status al top-level)
         return {
             "ok": True,
             "status": status,
@@ -194,7 +194,7 @@ class LlamadasService:
 
     # --------------- ciclo de vida ---------------
     def disconnect(self):
-        logging.info("🔌 Desconectando...")
+        logging.info("Desconectando...")
         self.running = False
         self.connected = False
         if self.socket:
@@ -202,7 +202,7 @@ class LlamadasService:
                 self.socket.close()
             except:
                 pass
-        logging.info("👋 Llamadas detenido")
+        logging.info("Llamadas detenido")
 
 
 def main():
@@ -213,7 +213,7 @@ def main():
         while svc.connected:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("\n⏹️ Deteniendo servicio...")
+        logging.info("\nDeteniendo servicio...")
     finally:
         svc.disconnect()
 

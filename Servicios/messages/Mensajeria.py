@@ -67,14 +67,14 @@ class MensajeriaService:
         self.db = cli[self.mongo_db]
         self.msgs = self.db[self.mongo_coll]
         self.msgs.create_index([("sender",ASCENDING),("receiver",ASCENDING),("fecha",ASCENDING)])
-        logging.info(f"✅ Mongo listo (Mensajería) → DB: {self.mongo_db}, colección: {self.mongo_coll}")
+        logging.info(f"Mongo listo (Mensajería) → DB: {self.mongo_db}, colección: {self.mongo_coll}")
 
     def connect(self):
         try:
             self._init_mongo()
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((self.bus_host, self.bus_port))
-            logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
+            logging.info(f"Conectando al BUS en {self.bus_host}:{self.bus_port}")
 
             send_jsonline(self.socket, {
                 "type": "REGISTER",
@@ -95,7 +95,7 @@ class MensajeriaService:
                 self.connected = True
                 self.running = True
                 
-                logging.info(f"✅ Servicio de Mensajería registrado en el BUS")
+                logging.info(f"Servicio de Mensajería registrado en el BUS")
                 
                 # ✅ Iniciar threads de gestión
                 threading.Thread(target=self._listen_messages, daemon=True).start()
@@ -104,10 +104,10 @@ class MensajeriaService:
                 
                 return True
             else:
-                logging.error(f"❌ Error en registro: {ack}")
+                logging.error(f"Error en registro: {ack}")
                 return False
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}")
+            logging.error(f"Error conectando al BUS: {e}")
             return False
 
     # ✅ Monitor de heartbeat
@@ -149,7 +149,7 @@ class MensajeriaService:
                 logging.error(f"Error en typing monitor: {e}")
 
     def _listen_messages(self):
-        logging.info("👂 Servicio de mensajería escuchando...")
+        logging.info("Servicio de mensajería escuchando...")
         buf = ""
         while self.running and self.connected:
             try:
@@ -170,14 +170,14 @@ class MensajeriaService:
                         message = json.loads(line)
                         self._handle_message(message)
                     except json.JSONDecodeError as je:
-                        logging.error(f"❌ Error parseando JSON: {je}")
+                        logging.error(f"Error parseando JSON: {je}")
                         
             except Exception as e:
                 if self.running:
-                    logging.error(f"❌ Error en socket: {e}")
+                    logging.error(f"Error en socket: {e}")
                     self.connected = False
                 break
-        logging.info("🔇 Listener detenido")
+        logging.info("Listener detenido")
 
     def _handle_message(self, message: dict):
         mtype = message.get("type")
@@ -195,7 +195,7 @@ class MensajeriaService:
         elif mtype == "DIRECT":
             pass  # Ignorar directs silenciosamente
         else:
-            logging.warning(f"⚠️ Tipo de mensaje desconocido: {mtype}")
+            logging.warning(f"Tipo de mensaje desconocido: {mtype}")
 
     def _reply(self, target: str, payload: dict, corr: Optional[str] = None):
         msg = { "type": "DIRECT", "target": target, "payload": payload }
@@ -217,9 +217,9 @@ class MensajeriaService:
                         "data": data
                     })
                 except Exception as e:
-                    logging.error(f"❌ Error enviando evento a {user_id}: {e}")
+                    logging.error(f"Error enviando evento a {user_id}: {e}")
         else:
-            logging.warning(f"⚠️ Usuario {user_id[:8]}... no está online")
+            logging.warning(f"Usuario {user_id[:8]}... no está online")
 
     # ✅ Broadcasting a una sala/canal
     def _broadcast_to_room(self, room_id: str, event_type: str, data: dict, exclude_user: str = None):
@@ -252,14 +252,14 @@ class MensajeriaService:
                 "status": "online"
             }
             if was_offline:
-                logging.info(f"👤 Usuario {user_id} → ONLINE")
+                logging.info(f"Usuario {user_id} → ONLINE")
                 self._broadcast_user_status(user_id, "online")
 
     def _set_user_offline(self, user_id: str):
         with self.users_lock:
             if user_id in self.online_users:
                 del self.online_users[user_id]
-                logging.info(f"👤 Usuario {user_id} → OFFLINE")
+                logging.info(f"Usuario {user_id} → OFFLINE")
                 self._broadcast_user_status(user_id, "offline")
 
     def _broadcast_user_status(self, user_id: str, status: str):
@@ -442,15 +442,62 @@ class MensajeriaService:
                     
                     # Consultar base de datos
                     sort_direction = -1 if sort_order == "desc" else 1
-                    cursor = self.msgs.find(filters).sort("fecha", sort_direction).skip(skip).limit(limit)
                     
-                    # Formatear resultados
+                    # Obtener colección de usuarios desde la BD usuarios_db
+                    users_db = self.db.client["usuarios_db"]
+                    users_collection = users_db["users"]
+                    
+                    # Primero obtenemos los mensajes
+                    cursor = self.msgs.find(filters).sort("fecha", sort_direction).skip(skip).limit(limit)
+                    messages_list = list(cursor)
+                    
+                    # Extraer todos los IDs únicos de sender y receiver (ya están como ObjectId)
+                    user_ids = set()
+                    for msg in messages_list:
+                        sender_oid = msg.get("sender")
+                        receiver_oid = msg.get("receiver")
+                        if sender_oid:
+                            user_ids.add(sender_oid)
+                        if receiver_oid:
+                            user_ids.add(receiver_oid)
+                    
+                    # Consultar usuarios en batch (comparando ObjectId con ObjectId)
+                    users_map = {}
+                    if user_ids:
+                        users_cursor = users_collection.find(
+                            {"_id": {"$in": list(user_ids)}},
+                            {"_id": 1, "username": 1}  # Solo _id y username
+                        )
+                        for user in users_cursor:
+                            # Mapear usando ObjectId como clave
+                            users_map[user["_id"]] = {
+                                "id": str(user["_id"]),
+                                "username": user.get("username", "unknown")
+                            }
+                    
+                    # Formatear resultados con información de usuarios
                     messages = []
-                    for doc in cursor:
+                    for doc in messages_list:
+                        sender_oid = doc.get("sender")
+                        receiver_oid = doc.get("receiver")
+                        
+                        # Buscar usando el ObjectId directamente
+                        sender_data = users_map.get(sender_oid, {
+                            "id": str(sender_oid) if sender_oid else "unknown",
+                            "username": "unknown"
+                        })
+                        
+                        receiver_data = users_map.get(receiver_oid, {
+                            "id": str(receiver_oid) if receiver_oid else "unknown",
+                            "username": "unknown"
+                        })
+                        
                         messages.append({
                             "id": str(doc["_id"]),
-                            "from": str(doc.get("sender")),
-                            "to": str(doc.get("receiver")),
+                            "from": str(sender_oid) if sender_oid else "",
+                            "to": str(receiver_oid) if receiver_oid else "",
+                            "sender": sender_data,
+                            "receiver": receiver_data,
                             "text": doc.get("mensaje", ""),
                             "timestamp": doc["fecha"].isoformat(),
                             "hora": doc.get("hora", ""),
@@ -528,7 +575,7 @@ def main():
     svc = MensajeriaService()
     try:
         if svc.connect():
-            logging.info("🚀 Servicio de Mensajería en Tiempo Real iniciado")
+            logging.info("Servicio de Mensajería en Tiempo Real iniciado")
             while svc.connected:
                 time.sleep(1)
     except KeyboardInterrupt:

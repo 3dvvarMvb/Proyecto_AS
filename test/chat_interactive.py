@@ -5,6 +5,7 @@ import uuid
 import threading
 import sys
 import os
+import getpass
 from datetime import datetime
 from bson.objectid import ObjectId
 
@@ -25,12 +26,13 @@ def recv_jsonline(sock: socket.socket, timeout=5.0) -> dict:
     return json.loads(line.strip())
 
 class InteractiveChatClient:
-    def __init__(self, user_id: str, username: str, bus_host="localhost", bus_port=5000):
+    def __init__(self, user_id: str, username: str, session_id: str, bus_host="localhost", bus_port=5000):
         self.bus_host = bus_host
         self.bus_port = bus_port
         self.socket = None
         self.user_id = user_id
         self.username = username
+        self.session_id = session_id  # ✅ Token de sesión para autenticación
         self.client_id = f"chat_{uuid.uuid4().hex[:8]}"
         self.running = False
         self.events = []
@@ -404,6 +406,285 @@ def clear_screen():
     """Limpia la pantalla de la consola"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
+def authenticate_user(bus_host="localhost", bus_port=5000):
+    """
+    Maneja el flujo de autenticación del usuario.
+    Retorna: (user_id, username, session_id) o None si falla
+    """
+    clear_screen()
+    print("=" * 80)
+    print("🔐 AUTENTICACIÓN - Servicio de Mensajería")
+    print("=" * 80)
+    
+    # Conectar temporalmente al BUS para autenticación
+    try:
+        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        temp_socket.connect((bus_host, bus_port))
+        temp_client_id = f"auth_temp_{uuid.uuid4().hex[:8]}"
+        
+        # Registrarse en el BUS
+        send_jsonline(temp_socket, {
+            "type": "REGISTER",
+            "kind": "client",
+            "client_id": temp_client_id
+        })
+        
+        ack = recv_jsonline(temp_socket, timeout=5.0)
+        if ack.get("type") != "REGISTER_ACK" or ack.get("status") != "success":
+            print("❌ Error conectando al servidor")
+            temp_socket.close()
+            return None
+        
+        print("\n1. Iniciar sesión")
+        print("2. Crear nueva cuenta")
+        print("0. Salir")
+        
+        choice = input("\n👉 Selecciona una opción: ").strip()
+        
+        if choice == "0":
+            temp_socket.close()
+            return None
+        
+        username = input("\n👤 Nombre de usuario: ").strip()
+        if not username:
+            print("❌ El nombre de usuario no puede estar vacío")
+            temp_socket.close()
+            return None
+        
+        password = getpass.getpass("🔑 Contraseña: ").strip()
+        if not password:
+            print("❌ La contraseña no puede estar vacía")
+            temp_socket.close()
+            return None
+        
+        correlation_id = str(uuid.uuid4())
+        
+        if choice == "1":
+            # ✅ Login
+            print("\n🔄 Iniciando sesión...")
+            request = {
+                "type": "REQUEST",
+                "service": "Autenticacion",
+                "sender": temp_client_id,
+                "header": {
+                    "correlationId": correlation_id,
+                    "service": "Autenticacion"
+                },
+                "payload": {
+                    "action": "login",
+                    "username": username,
+                    "password": password
+                }
+            }
+            
+        elif choice == "2":
+            # ✅ Registro
+            print("\n🔄 Creando cuenta...")
+            # Primero crear el usuario
+            create_corr = str(uuid.uuid4())
+            create_request = {
+                "type": "REQUEST",
+                "service": "Autenticacion",
+                "sender": temp_client_id,
+                "header": {
+                    "correlationId": create_corr,
+                    "service": "Autenticacion"
+                },
+                "payload": {
+                    "action": "create_user",
+                    "username": username,
+                    "password": password,
+                    "role": "user"
+                }
+            }
+            
+            send_jsonline(temp_socket, create_request)
+            
+            # Esperar respuesta de creación
+            create_response = wait_for_response(temp_socket, create_corr, timeout=10.0)
+            if not create_response:
+                print("❌ Timeout esperando respuesta del servidor")
+                temp_socket.close()
+                return None
+            
+            create_data = create_response.get("payload", {}).get("data", {})
+            if create_data.get("status") != "created":
+                error_msg = create_data.get("message", "Error desconocido")
+                print(f"❌ Error creando usuario: {error_msg}")
+                temp_socket.close()
+                return None
+            
+            print("✅ Usuario creado exitosamente")
+            time.sleep(1)
+            print("🔄 Iniciando sesión automática...")
+            
+            # Ahora hacer login automático
+            correlation_id = str(uuid.uuid4())
+            request = {
+                "type": "REQUEST",
+                "service": "Autenticacion",
+                "sender": temp_client_id,
+                "header": {
+                    "correlationId": correlation_id,
+                    "service": "Autenticacion"
+                },
+                "payload": {
+                    "action": "login",
+                    "username": username,
+                    "password": password
+                }
+            }
+        else:
+            print("❌ Opción inválida")
+            temp_socket.close()
+            return None
+        
+        # Enviar request de login
+        send_jsonline(temp_socket, request)
+        
+        # Esperar respuesta
+        response = wait_for_response(temp_socket, correlation_id, timeout=10.0)
+        temp_socket.close()
+        
+        if not response:
+            print("❌ Timeout esperando respuesta del servidor")
+            return None
+        
+        payload = response.get("payload", {})
+        data = payload.get("data", {})
+        
+        if data.get("status") == "ok":
+            session_id = data.get("session_id")
+            username_returned = data.get("username")
+            
+            if not session_id:
+                print("❌ No se recibió session_id del servidor")
+                return None
+            
+            print(f"\n✅ Autenticación exitosa")
+            print(f"👤 Usuario: {username_returned}")
+            print(f"🎫 Session ID: {session_id[:16]}...")
+            
+            # Obtener el user_id del usuario autenticado
+            # Para esto, necesitamos consultar al servicio de administración
+            user_id = get_user_id_from_username(username_returned, bus_host, bus_port)
+            
+            if not user_id:
+                print("⚠️ No se pudo obtener user_id, usando uno generado")
+                user_id = str(ObjectId())
+            
+            time.sleep(1)
+            return (user_id, username_returned, session_id)
+        
+        else:
+            error_msg = data.get("message", "Error desconocido")
+            print(f"❌ Autenticación fallida: {error_msg}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error durante autenticación: {e}")
+        try:
+            temp_socket.close()
+        except:
+            pass
+        return None
+
+def wait_for_response(sock: socket.socket, correlation_id: str, timeout: float = 10.0) -> dict:
+    """Espera una respuesta con el correlationId específico"""
+    start = time.time()
+    buf = ""
+    
+    while time.time() - start < timeout:
+        try:
+            sock.settimeout(1.0)
+            chunk = sock.recv(4096).decode("utf-8")
+            if not chunk:
+                return None
+            buf += chunk
+            
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    msg = json.loads(line)
+                    
+                    # Ignorar mensajes que no son respuestas
+                    if msg.get("type") in ["DELIVERY_ACK", "BROADCAST"]:
+                        continue
+                    
+                    # Verificar si es la respuesta que esperamos
+                    header = msg.get("header", {})
+                    if header.get("correlationId") == correlation_id:
+                        return msg
+                        
+                except json.JSONDecodeError:
+                    continue
+                    
+        except socket.timeout:
+            continue
+        except Exception as e:
+            return None
+    
+    return None
+
+def get_user_id_from_username(username: str, bus_host="localhost", bus_port=5000) -> str:
+    """
+    Obtiene el user_id (ObjectId) desde el servicio de administración
+    consultando por username
+    """
+    try:
+        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        temp_socket.connect((bus_host, bus_port))
+        temp_client_id = f"admin_temp_{uuid.uuid4().hex[:8]}"
+        
+        # Registrarse en el BUS
+        send_jsonline(temp_socket, {
+            "type": "REGISTER",
+            "kind": "client",
+            "client_id": temp_client_id
+        })
+        
+        ack = recv_jsonline(temp_socket, timeout=5.0)
+        if ack.get("type") != "REGISTER_ACK":
+            temp_socket.close()
+            return None
+        
+        correlation_id = str(uuid.uuid4())
+        
+        # Solicitar información del usuario
+        request = {
+            "type": "REQUEST",
+            "service": "Administracion",
+            "sender": temp_client_id,
+            "header": {
+                "correlationId": correlation_id,
+                "service": "Administracion"
+            },
+            "payload": {
+                "action": "get_user",
+                "username": username
+            }
+        }
+        
+        send_jsonline(temp_socket, request)
+        response = wait_for_response(temp_socket, correlation_id, timeout=5.0)
+        temp_socket.close()
+        
+        if response:
+            payload = response.get("payload", {})
+            if payload.get("ok"):
+                user_data = payload.get("user", {})
+                return user_data.get("_id", user_data.get("id"))
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Error obteniendo user_id: {e}")
+        return None
+
 def show_user_menu(client):
     """Muestra menú de selección de usuarios"""
     while client.running:
@@ -521,31 +802,27 @@ def main():
     print("💬 CHAT INTERACTIVO - Servicio de Mensajería")
     print("=" * 80)
     
-    # Pedir datos del usuario
-    username = input("\n👤 Tu nombre de usuario: ").strip()
-    if not username:
-        username = f"Usuario_{uuid.uuid4().hex[:4]}"
+    # ✅ FLUJO DE AUTENTICACIÓN
+    bus_host = os.getenv("BUS_HOST", "localhost")
+    bus_port = int(os.getenv("BUS_PORT", "5000"))
     
-    # Pedir o generar user_id
-    user_id_input = input("🆔 Tu User ID (ObjectId, Enter para generar uno nuevo): ").strip()
-    if user_id_input:
-        try:
-            user_id = str(ObjectId(user_id_input))
-        except:
-            print("⚠️ ID inválido, generando uno nuevo...")
-            user_id = str(ObjectId())
-    else:
-        user_id = str(ObjectId())
+    auth_result = authenticate_user(bus_host, bus_port)
+    
+    if not auth_result:
+        print("\n❌ No se pudo autenticar. Saliendo...")
+        return
+    
+    user_id, username, session_id = auth_result
     
     print(f"\n✅ Tu User ID: {user_id}")
-    print("⏳ Conectando y descubriendo usuarios...")
+    print("⏳ Conectando al chat y descubriendo usuarios...")
     
-    # Crear cliente
-    client = InteractiveChatClient(user_id, username)
+    # Crear cliente con autenticación
+    client = InteractiveChatClient(user_id, username, session_id, bus_host, bus_port)
     
     # Conectar
     if not client.connect():
-        print("❌ No se pudo conectar al servidor")
+        print("❌ No se pudo conectar al servidor de chat")
         return
     
     # Esperar un poco para recibir broadcasts de otros usuarios

@@ -55,7 +55,7 @@ class MessageBus:
             self.server_socket.listen(64)
 
             self.running = True
-            logging.info(f"🚌 ESB iniciado en {self.host}:{self.port}")
+            logging.info(f"ESB iniciado en {self.host}:{self.port}")
 
             while self.running:
                 try:
@@ -87,7 +87,7 @@ class MessageBus:
                 self.server_socket.close()
             except:
                 pass
-        logging.info("🛑 ESB detenido")
+        logging.info("ESB detenido")
 
     # ------------------------- manejo de cliente -------------------------
 
@@ -130,7 +130,7 @@ class MessageBus:
 
             ack = {"type": "REGISTER_ACK", "status": "success", "message": f"Cliente {client_id} registrado", "timestamp": utcnow_iso()}
             send_jsonline(client_socket, ack)
-            logging.info(f"✅ Registrado: id={client_id} kind={kind} service={service_name} desde {address}")
+            logging.info(f"Registrado: id={client_id} kind={kind} service={service_name} desde {address}")
 
             # ✅ Broadcast a todos los clientes que alguien se conectó
             if kind == "client":
@@ -289,7 +289,7 @@ class MessageBus:
             return
         try:
             sock.sendall((json.dumps(msg) + "\n").encode("utf-8"))
-            logging.info(f"📤 {sender_id} → {target_id} : {msg.get('type')}")
+            logging.info(f"{sender_id} → {target_id} : {msg.get('type')}")
             # ACK al emisor para DIRECT y REQUEST
             if msg.get("type") in ("DIRECT", "REQUEST"):
                 ack = {"type": "DELIVERY_ACK", "status": "delivered", "target": target_id, "timestamp": utcnow_iso()}
@@ -345,7 +345,7 @@ class MessageBus:
                         send_jsonline(sock, msg)
                     except Exception as e:
                         logging.error(f"Error broadcasting user_joined a {cid}: {e}")
-        logging.info(f"📢 Broadcast: {client_id} se unió")
+        logging.info(f"BROADCAST: {client_id} se unió")
 
     def _broadcast_user_left(self, client_id: str):
         """Notifica a todos los clientes que alguien se desconectó"""
@@ -362,7 +362,7 @@ class MessageBus:
                         send_jsonline(sock, msg)
                     except Exception as e:
                         logging.error(f"Error broadcasting user_left a {cid}: {e}")
-        logging.info(f"📢 Broadcast: {client_id} se fue")
+        logging.info(f"BROADCAST: {client_id} se fue")
 
 
 def main():

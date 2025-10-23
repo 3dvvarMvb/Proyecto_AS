@@ -120,16 +120,16 @@ class ContactosService:
             db = self.db_client[self.mongo_db]
             self.col = db[self.mongo_coll]
             self.col.create_index([("departamento", ASCENDING), ("nombre", ASCENDING)])
-            logging.info("✅ MongoDB listo (Contactos)")
+            logging.info("MongoDB listo (Contactos)")
             return True
         except PyMongoError as e:
-            logging.error(f"❌ Error conectando a MongoDB: {e}")
+            logging.error(f"Error conectando a MongoDB: {e}")
             return False
 
     def connect_bus(self) -> bool:
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
+            logging.info(f"Conectando al BUS en {self.bus_host}:{self.bus_port}")
             self.socket.connect((self.bus_host, self.bus_port))
 
             register_message = {
@@ -160,19 +160,19 @@ class ContactosService:
                         self.connected = True
                         self.running = True
                         threading.Thread(target=self._listen_messages, daemon=True).start()
-                        logging.info("✅ Registrado en BUS como servicio 'Contactos'")
-                        logging.info("🚀 Servicio de Contactos iniciado correctamente")
+                        logging.info("Registrado en BUS como servicio 'Contactos'")
+                        logging.info("Servicio de Contactos iniciado correctamente")
                         return True
 
-            logging.error(f"❌ Error en registro BUS: {buf!r}")
+            logging.error(f"Error en registro BUS: {buf!r}")
             return False
 
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}")
+            logging.error(f"Error conectando al BUS: {e}")
             return False
 
     def _listen_messages(self):
-        logging.info("👂 Iniciando escucha de mensajes del BUS...")
+        logging.info("Iniciando escucha de mensajes del BUS...")
         buf = ""
         while self.running and self.connected:
             try:
@@ -196,22 +196,22 @@ class ContactosService:
 
             except Exception as e:
                 if self.running:
-                    logging.error(f"Error recibiendo mensaje: {e}")
+                    logging.error(f"Error recibiendo: {e}")
                     self.connected = False
                 break
-        logging.info("🔇 Listener detenido")
+        logging.info("Listener detenido")
 
     def _send(self, d: Dict[str, Any]) -> bool:
         if not self.connected:
-            logging.error("❌ No conectado al BUS. No se puede enviar mensaje.")
+            logging.error("No conectado al BUS. No se puede enviar mensaje.")
             return False
         try:
             d.setdefault("sender", self.client_id)
             self.socket.sendall(_jsonline(d))
-            logging.info(f"📤 Mensaje enviado - Tipo: {d.get('type')}")
+            logging.info(f"Mensaje enviado - Tipo: {d.get('type')}")
             return True
         except Exception as e:
-            logging.error(f"❌ Error enviando mensaje: {e}")
+            logging.error(f"Error enviando mensaje: {e}")
             self.connected = False
             return False
 
@@ -232,7 +232,7 @@ class ContactosService:
     def _handle_message(self, message: Dict[str, Any]):
         mtype = message.get("type")
         sender = message.get("sender", "UNKNOWN")
-        logging.info(f"📩 Mensaje recibido - Tipo: {mtype}, De: {sender}")
+        logging.info(f"Mensaje recibido - Tipo: {mtype}, De: {sender}")
 
         if mtype == "REQUEST":
             header = message.get("header") or {}
@@ -255,17 +255,17 @@ class ContactosService:
             return
 
         if mtype == "BROADCAST":
-            logging.info(f"📣 BROADCAST de {sender}: {message.get('payload', {})}")
+            logging.info(f"BROADCAST de {sender}: {message.get('payload', {})}")
             return
 
         if mtype == "DELIVERY_ACK":
-            logging.info(f"✅ Mensaje entregado a {message.get('target')}")
+            logging.info(f"Mensaje entregado a {message.get('target')}")
             return
 
         if mtype == "ERROR":
-            logging.error(f"❌ Error del BUS: {message.get('message')}")
+            logging.error(f"Error del BUS: {message.get('message')}")
             return
-        logging.info(f"🛠️ REQUEST action={action!r} payload_keys={list(payload.keys())}")
+        logging.info(f"REQUEST action={action!r} payload_keys={list(payload.keys())}")
 
         logging.debug(f"(ignorado) {message}")
 
@@ -440,7 +440,7 @@ class ContactosService:
         return {"ok": True, "contacts": items}
 
     def disconnect(self):
-        logging.info("🔌 Desconectando del BUS/Mongo...")
+        logging.info("Desconectando del BUS/Mongo...")
         self.running = False
         self.connected = False
         if self.socket is not None:
@@ -453,7 +453,7 @@ class ContactosService:
                 self.db_client.close()
             except:
                 pass
-        logging.info("👋 Contactos detenido")
+        logging.info("Contactos detenido")
         
     def _import_contacts(self, p: Dict[str, Any]) -> Dict[str, Any]:
         fmt = (p.get("format") or "xlsx").strip().lower()
@@ -559,7 +559,7 @@ class ContactosService:
             except Exception as e:
                 errors.append(f"Fila {i+1}: {e}")
 
-        logging.info(f"📦 Import CSV/XLSX => rows={processed_rows} inserted={inserted} updated={updated} skipped={skipped} errors={len(errors)}")
+        logging.info(f"Import CSV/XLSX => rows={processed_rows} inserted={inserted} updated={updated} skipped={skipped} errors={len(errors)}")
         return {"ok": True, "data": {
             "inserted": inserted,
             "updated": updated,
@@ -616,15 +616,15 @@ def main():
     svc = ContactosService()
     try:
         if not svc.init_db():
-            logging.error("❌ No se pudo iniciar MongoDB")
+            logging.error("No se pudo iniciar MongoDB")
             return
         if not svc.connect_bus():
-            logging.error("❌ No se pudo registrar en el BUS")
+            logging.error("No se pudo registrar en el BUS")
             return
         while svc.connected:
             time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("\n⏹️ Deteniendo servicio...")
+        logging.info("\nDeteniendo servicio...")
     finally:
         svc.disconnect()
 

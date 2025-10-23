@@ -52,9 +52,9 @@ class AdministracionService:
             self.calls=cli[self.calls_db]["llamadas"]; self.calls.create_index([("fecha",ASCENDING),("hora",ASCENDING)])
             try: self.msgs=cli[self.msgs_db]["mensajes"]
             except: self.msgs=None
-            logging.info("✅ Mongo listo en Administración")
+            logging.info("Mongo listo en Administración")
         except Exception as e:
-            logging.warning(f"⚠️ Administración sin Mongo (delegará): {e}")
+            logging.warning(f"Administración sin Mongo (delegará): {e}")
             self._mongo=None; self.users=None; self.calls=None; self.msgs=None
 
     # --- BUS
@@ -63,19 +63,19 @@ class AdministracionService:
             self._init_mongo()
             self.socket=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
             self.socket.connect((self.bus_host,self.bus_port))
-            logging.info(f"🔌 Conectando al BUS en {self.bus_host}:{self.bus_port}")
+            logging.info(f"Conectando al BUS en {self.bus_host}:{self.bus_port}")
             self.socket.sendall(_jsonline({"type":"REGISTER","client_id":self.client_id,"kind":"service","service":"Administracion"}))
             self.connected=True; self.running=True
             threading.Thread(target=self._listen,daemon=True).start()
-            logging.info("🚀 Servicio de Administración iniciado")
+            logging.info("Servicio de Administración iniciado")
             return True
         except Exception as e:
-            logging.error(f"❌ Error conectando al BUS: {e}"); return False
+            logging.error(f"Error conectando al BUS: {e}"); return False
 
     def _send(self,obj:dict)->bool:
         if not self.connected or not self.socket: return False
         try: obj.setdefault("sender",self.client_id); self.socket.sendall(_jsonline(obj)); return True
-        except Exception as e: logging.error(f"❌ Error enviando: {e}"); self.connected=False; return False
+        except Exception as e: logging.error(f"Error enviando: {e}"); self.connected=False; return False
 
     def _reply(self,target:str,data:dict,corr:Optional[str]):
         payload={"ok": True, "data": data} if not data.get("ok") else data  # si ya viene con ok, respeta
@@ -84,7 +84,7 @@ class AdministracionService:
         self._send(out)
 
     def _listen(self):
-        logging.info("👂 Iniciando escucha de mensajes del BUS...")
+        logging.info("Iniciando escucha de mensajes del BUS...")
         buf=""
         while self.running and self.connected and self.socket:
             try:
@@ -99,7 +99,7 @@ class AdministracionService:
             except Exception as e:
                 if self.running: logging.error(f"Error recibiendo: {e}"); self.connected=False
                 break
-        logging.info("🔇 Listener detenido")
+        logging.info("Listener detenido")
 
     def _handle(self,m:dict):
         t=m.get("type"); sender=m.get("sender","UNKNOWN")
@@ -118,13 +118,34 @@ class AdministracionService:
                     self._cv.notify_all()
             return
 
-        if t=="DELIVERY_ACK": logging.info(f"✅ Mensaje entregado a {m.get('target')}"); return
-        if t in ("BROADCAST","EVENT"): logging.info(f"📣 {t} de {sender}: {m.get('payload')}"); return
+        if t=="DELIVERY_ACK": logging.info(f"Mensaje entregado a {m.get('target')}"); return
+        if t in ("BROADCAST","EVENT"): logging.info(f"{t} de {sender}: {m.get('payload')}"); return
 
     # --- acciones
     def _exec(self,p:Dict[str,Any])->Dict[str,Any]:
         a=p.get("action","")
         if a=="verify_admin": return self._verify_admin(p)
+        if a=="get_user":
+            # ✅ Nueva acción para obtener usuario completo con _id
+            username=p.get("username")
+            if not username: return {"ok":False,"error":"falta username"}
+            if self.users is not None:
+                try:
+                    u=self.users.find_one({"username":username})
+                    if u:
+                        return {"ok":True,"user":{
+                            "_id":str(u.get("_id")),
+                            "id":str(u.get("_id")),
+                            "username":u.get("username"),
+                            "role":u.get("role","user"),
+                            "active":bool(u.get("active",True)),
+                            "created_at":_to_iso(u.get("created_at"))
+                        }}
+                    return {"ok":False,"error":"not_found"}
+                except PyMongoError as e:
+                    logging.warning(f"Mongo get_user falló: {e}")
+                    return {"ok":False,"error":str(e)}
+            return {"ok":False,"error":"mongo no disponible"}
         if a=="get_user_info":
             r=self._auth("get_user",{"username":p.get("username")})
             if r.get("ok"): 
@@ -201,7 +222,7 @@ class AdministracionService:
                 "messages":{"total":msgs_total}}
 
     def disconnect(self):
-        logging.info("🔌 Desconectando del BUS...")
+        logging.info("Desconectando del BUS...")
         self.running=False; self.connected=False
         if self.socket:
             try: self.socket.close()
@@ -209,7 +230,7 @@ class AdministracionService:
         if self._mongo:
             try: self._mongo.close()
             except: pass
-        logging.info("👋 Administración detenida")
+        logging.info("Administración detenida")
 
 def main():
     svc=AdministracionService()
