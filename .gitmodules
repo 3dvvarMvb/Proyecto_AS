@@ -1,4 +1,0 @@
-[submodule "Android/Citofono"]
-	path = Android/Citofono
-	url = git@github.com:3dvvarMvb/Citofono.git
-	branch = PASF
