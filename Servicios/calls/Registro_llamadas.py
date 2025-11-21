@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [REGISTRO] - %(levelname)s - %(message)s")
 
@@ -71,6 +72,7 @@ class RegistroLlamadasService:
         mongo_uri: str = os.getenv("MONGO_URI", "mongodb://app_user:app_password_123@mongo:27017/llamadas_db?authSource=admin"),
         mongo_db: str = os.getenv("MONGO_DB", "llamadas_db"),
         mongo_coll: str = os.getenv("MONGO_COLL", "llamadas"),
+        local_tz_name: str = os.getenv("LOCAL_TZ", "America/Santiago"),
     ):
         self.client_id = client_id
         self.bus_host = bus_host
@@ -84,6 +86,19 @@ class RegistroLlamadasService:
         self.mongo_coll = mongo_coll
         self.db = None
         self.col = None
+        try:
+            self.local_tz = ZoneInfo(local_tz_name)
+            logging.info(f"🕒 Zona horaria local para registro: {local_tz_name}")
+        except Exception:
+            logging.warning(f"⚠️ Zona horaria '{local_tz_name}' no disponible, usando UTC")
+            self.local_tz = timezone.utc
+
+    def _now_local(self) -> datetime:
+        now_utc = datetime.now(timezone.utc)
+        try:
+            return now_utc.astimezone(self.local_tz)
+        except Exception:
+            return now_utc
 
     # ---------- Mongo ----------
     def init_db(self) -> bool:
@@ -191,8 +206,18 @@ class RegistroLlamadasService:
         out["id"] = str(out.pop("_id", out.get("_id", "")))
         f = out.get("fecha")
         if isinstance(f, datetime):
-            out["tsMillis"] = millis(f)
-            out["fecha"] = _to_jsonable(f)  # ISO
+            msec = millis(f)
+            out["tsMillis"] = out.get("tsMillis", msec)
+            iso = _to_jsonable(f)
+            out["fecha"] = iso  # ISO
+            out.setdefault("timestamp", iso)
+        elif "timestamp" in out:
+            # intentar derivar milisegundos desde timestamp string
+            try:
+                parsed = datetime.fromisoformat(str(out["timestamp"]))
+                out["tsMillis"] = out.get("tsMillis", millis(parsed))
+            except Exception:
+                pass
         # asegurar callerId string
         if isinstance(out.get("callerId"), ObjectId):
             out["callerId"] = str(out["callerId"])
@@ -236,8 +261,9 @@ class RegistroLlamadasService:
 
         status = map_status(p.get("status"), duration_i)
 
-        now = now_utc()
+        now = self._now_local()
         hora = now.strftime("%H:%M:%S")
+        ts_millis = millis(now)
 
         doc = {
             "fecha": now,
@@ -246,6 +272,8 @@ class RegistroLlamadasService:
             "depto": depto,
             "status": status,
             "destination": destination or None,
+            "timestamp": now.isoformat(),
+            "tsMillis": ts_millis,
         }
         if duration_i is not None:
             # nombres que usa tu app
@@ -255,7 +283,7 @@ class RegistroLlamadasService:
             doc["callerId"] = caller_oid
 
         res = self.col.insert_one(doc)
-        return {"ok": True, "id": str(res.inserted_id)}
+        return {"ok": True, "id": str(res.inserted_id), "tsMillis": ts_millis, "timestamp": doc["timestamp"]}
 
     def _list_calls(self, p: Dict[str, Any]) -> Dict[str, Any]:
         limit = max(1, min(int(p.get("limit", 50)), 200))

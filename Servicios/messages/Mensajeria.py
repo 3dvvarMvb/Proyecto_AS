@@ -1,9 +1,10 @@
 import socket, json, threading, logging, time, os, hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict, Set
 from pymongo import MongoClient, ASCENDING
 from bson.objectid import ObjectId
 from collections import defaultdict
+from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [MENSAJERÍA] - %(levelname)s - %(message)s')
 
@@ -55,6 +56,13 @@ class MensajeriaService:
         self.mongo_coll = os.getenv("MONGO_COLL", "mensajes")
         self.db = None
         self.msgs = None
+        try:
+            tz_name = os.getenv("LOCAL_TZ", "America/Santiago")
+            self.local_tz = ZoneInfo(tz_name)
+            logging.info(f"🕒 Zona horaria local Mensajería: {tz_name}")
+        except Exception:
+            logging.warning("⚠️ ZoneInfo no disponible, usando UTC")
+            self.local_tz = timezone.utc
 
     def _init_mongo(self):
         cli = MongoClient(self.mongo_uri, serverSelectionTimeoutMS=6000)
@@ -63,6 +71,92 @@ class MensajeriaService:
         self.msgs = self.db[self.mongo_coll]
         self.msgs.create_index([("sender",ASCENDING),("receiver",ASCENDING),("fecha",ASCENDING)])
         logging.info(f"✅ Mongo listo (Mensajería) → DB: {self.mongo_db}, colección: {self.mongo_coll}")
+
+    def _safe_str(self, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return None
+
+    def _build_user_info(self, doc: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+        oid = doc.get(prefix)
+        user_id = self._safe_str(doc.get(f"{prefix}UserId"))
+        username = self._safe_str(doc.get(f"{prefix}Username")) or user_id
+        info = {
+            "id": str(oid) if oid else None,
+            "userId": user_id or (str(oid) if oid else None),
+            "username": username or (str(oid) if oid else "unknown"),
+        }
+        client_key = f"{prefix}ClientId"
+        if doc.get(client_key):
+            info["clientId"] = doc[client_key]
+        return info
+
+    def _serialize_message_doc(self, doc: Dict[str, Any]) -> Dict[str, Any]:
+        sender_info = self._build_user_info(doc, "sender")
+        receiver_info = self._build_user_info(doc, "receiver")
+        text = doc.get("mensaje") or doc.get("message") or ""
+        ts = doc.get("fecha")
+        ts_str = None
+        ts_millis = doc.get("tsMillis")
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            ts_str = ts.isoformat()
+            if ts_millis is None:
+                ts_millis = int(ts.timestamp() * 1000)
+        if ts_str is None:
+            ts = ts or datetime.now(self.local_tz)
+            if isinstance(ts, datetime):
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=self.local_tz)
+                ts_str = ts.isoformat()
+                if ts_millis is None:
+                    ts_millis = int(ts.timestamp() * 1000)
+            else:
+                ts_str = str(ts)
+        payload = {
+            "id": str(doc.get("_id")),
+            "from": sender_info["username"],
+            "fromId": sender_info.get("userId") or sender_info.get("id"),
+            "to": receiver_info["username"],
+            "toId": receiver_info.get("userId") or receiver_info.get("id"),
+            "text": text,
+            "ts": ts_str,
+            "tsMillis": ts_millis,
+            "sender": sender_info,
+            "receiver": receiver_info,
+            "deliveryStatus": doc.get("deliveryStatus", "sent"),
+            "readStatus": doc.get("readStatus", "unread")
+        }
+        if doc.get("hora"):
+            payload["hora"] = doc["hora"]
+        return payload
+
+    def _parse_date(self, value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(value)
+            except Exception:
+                return None
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except Exception:
+                    continue
+            try:
+                return datetime.fromisoformat(value)
+            except Exception:
+                return None
+        return None
 
     def connect(self):
         try:
@@ -171,8 +265,11 @@ class MensajeriaService:
         sender = message.get("sender", "UNKNOWN")
         
         if mtype == "REQUEST":
-            payload = message.get("payload", {}) or {}
-            corr = (message.get("header") or {}).get("correlationId")
+            payload = dict(message.get("payload", {}) or {})
+            header = message.get("header") or {}
+            if "action" not in payload and header.get("action"):
+                payload["action"] = header["action"]
+            corr = header.get("correlationId")
             self._route_request(sender, payload, corr)
 
     def _reply(self, target: str, payload: dict, corr: Optional[str] = None):
@@ -299,22 +396,45 @@ class MensajeriaService:
                     self._reply(sender, {"ok": False, "error": "Mongo no inicializado"}, corr)
                     return
                     
-                now = datetime.utcnow()
-                sender_oid   = to_object_id_any(p.get("senderObjId")   or p.get("senderId"))
-                receiver_oid = to_object_id_any(p.get("receiverObjId") or p.get("receiverId"))
+                now = datetime.now(timezone.utc)
+                now_local = now.astimezone(self.local_tz)
+                sender_raw = self._safe_str(
+                    p.get("senderObjId") or p.get("senderId") or p.get("sender") or p.get("from")
+                )
+                receiver_raw = self._safe_str(
+                    p.get("receiverObjId") or p.get("receiverId") or p.get("receiver") or p.get("to")
+                )
+                sender_oid   = to_object_id_any(sender_raw or p.get("senderObjId"))
+                receiver_oid = to_object_id_any(receiver_raw or p.get("receiverObjId"))
+                sender_username = self._safe_str(p.get("senderUsername") or p.get("senderName")) or sender_raw or "unknown"
+                receiver_username = self._safe_str(p.get("receiverUsername") or p.get("receiverName")) or receiver_raw or "unknown"
+                sender_identifier = sender_raw or (str(sender_oid) if sender_oid else "")
+                receiver_identifier = receiver_raw or (str(receiver_oid) if receiver_oid else "")
                 
                 # ✅ Agregar logs para debugging
                 logging.info(f"📨 Enviando mensaje: {str(sender_oid)[:8]}... → {str(receiver_oid)[:8]}...")
                 
                 doc = {
-                    "fecha": now,
-                    "hora": now.strftime("%H:%M:%S"),
+                    "fecha": now_local,
+                    "hora": now_local.strftime("%H:%M:%S"),
+                    "timestamp": now_local.isoformat(),
+                    "tsMillis": int(now_local.timestamp() * 1000),
                     "sender": sender_oid,
                     "receiver": receiver_oid,
                     "mensaje": p.get("message", ""),
                     "deliveryStatus": "enviado",
-                    "readStatus": "no_leido"
+                    "readStatus": "no_leido",
+                    "senderUsername": sender_username,
+                    "receiverUsername": receiver_username,
+                    "senderClientId": sender
                 }
+                if sender_raw:
+                    doc["senderUserId"] = sender_raw
+                if receiver_raw:
+                    doc["receiverUserId"] = receiver_raw
+                receiver_client = self._safe_str(p.get("receiverClientId") or p.get("receiverClient"))
+                if receiver_client:
+                    doc["receiverClientId"] = receiver_client
                 mid = self.msgs.insert_one(doc).inserted_id
                 
                 # ✅ ACK al remitente
@@ -326,19 +446,22 @@ class MensajeriaService:
                 }, corr)
                 
                 # ✅ Log antes de notificar
-                receiver_str = str(receiver_oid)
-                logging.info(f"🔔 Intentando notificar a usuario {receiver_str[:8]}...")
+                logging.info(f"🔔 Intentando notificar a usuario {receiver_identifier[:8]}...")
                 
                 with self.users_lock:
                     logging.info(f"📋 Usuarios online: {list(self.online_users.keys())}")
                 
                 # ✅ Notificar al destinatario en tiempo real
-                self._broadcast_to_user(receiver_str, "new_message", {
+                self._broadcast_to_user(receiver_identifier, "new_message", {
                     "messageId": str(mid),
-                    "from": str(sender_oid),
-                    "to": receiver_str,
+                    "from": str(sender_oid) if sender_oid else sender_identifier,
+                    "fromUsername": sender_username,
+                    "fromUserId": sender_raw,
+                    "to": receiver_identifier,
+                    "toUsername": receiver_username,
+                    "toUserId": receiver_raw,
                     "text": p.get("message", ""),
-                    "timestamp": now.isoformat()
+                    "timestamp": now_local.isoformat()
                 })
     
             # ✅ Marcar mensaje como entregado
@@ -385,21 +508,44 @@ class MensajeriaService:
                     ]
                 }).sort("fecha", -1).limit(lim)
                 
-                items = [{
-                    "id": str(d["_id"]),
-                    "from": str(d.get("sender")),
-                    "to":   str(d.get("receiver")),
-                    "text": d.get("mensaje"),
-                    "ts":   d["fecha"].isoformat(),
-                    "deliveryStatus": d.get("deliveryStatus", "sent"),
-                    "readStatus": d.get("readStatus", "unread")
-                } for d in cur]
+                items = [self._serialize_message_doc(d) for d in cur]
                 
                 self._reply(sender, {
                     "ok": True, 
                     "messages": items, 
                     "hasMore": len(items) == lim
                 }, corr)
+            
+            # ✅ Listado completo para consola/admin
+            elif act == "get_all_messages":
+                if self.msgs is None:
+                    self._reply(sender, {"ok": False, "error": "Mongo no inicializado"}, corr)
+                    return
+                lim = int(p.get("limit", 500))
+                lim = max(1, min(lim, 2000))
+                query: Dict[str, Any] = {}
+                user_filter = self._safe_str(p.get("user") or p.get("username") or p.get("userId"))
+                if user_filter:
+                    ors = []
+                    uid = to_object_id_any(user_filter)
+                    if uid:
+                        ors.append({"sender": uid})
+                        ors.append({"receiver": uid})
+                    ors.append({"senderUserId": user_filter})
+                    ors.append({"receiverUserId": user_filter})
+                    query["$or"] = ors
+                date_cond: Dict[str, Any] = {}
+                start = self._parse_date(p.get("from") or p.get("fromDate"))
+                end = self._parse_date(p.get("to") or p.get("toDate"))
+                if start:
+                    date_cond["$gte"] = start
+                if end:
+                    date_cond["$lte"] = end
+                if date_cond:
+                    query["fecha"] = date_cond
+                cur = self.msgs.find(query or {}).sort("fecha", -1).limit(lim)
+                items = [self._serialize_message_doc(d) for d in cur]
+                self._reply(sender, {"ok": True, "messages": items, "count": len(items)}, corr)
 
             # ✅ Unirse a sala/canal
             elif act == "joinRoom":

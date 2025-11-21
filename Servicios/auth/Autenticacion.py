@@ -227,8 +227,11 @@ class AutenticacionService:
                             # compat (por si algún cliente viejo lo usa):
                             "token": r["session_id"],
                             "userType": r.get("user", {}).get("role", "user"),
-                            "userId": r.get("user", {}).get("username"),
+                           "userId": r.get("user", {}).get("username"),
                         }
+                        closed = r.get("closed_sessions", 0)
+                        if closed:
+                            res["closed_sessions"] = closed
                     else:
                         res = {"status": "denied", "message": r.get("message", "")}
                 else:
@@ -305,6 +308,19 @@ class AutenticacionService:
 
         session_id = secrets.token_urlsafe(24)
         now = now_utc()
+        # Cerrar sesiones anteriores activas para este usuario (solo una sesión a la vez)
+        close_filter = {
+            "active": True,
+            "$or": [
+                {"username": user["username"]},
+                {"user_id": str(user["_id"])},
+            ]
+        }
+        closed_result = self.sessions.update_many(
+            close_filter,
+            {"$set": {"active": False, "closed_at": now}}
+        )
+        closed_sessions = closed_result.modified_count
         self.sessions.insert_one({
             "session_id": session_id,
             "user_id": str(user["_id"]),
@@ -319,6 +335,7 @@ class AutenticacionService:
             "session_id": session_id,
             "expires_at": to_ts(now + self.session_ttl),
             "user": {"username": user["username"], "role": user.get("role", "user")},
+            "closed_sessions": closed_sessions,
         }
 
     def _validate_session(self, p: Dict[str, Any]) -> Dict[str, Any]:
